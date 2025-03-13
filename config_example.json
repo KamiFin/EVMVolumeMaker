@@ -1,0 +1,32 @@
+{
+    "chain": {
+        "rpc_url": "https://rpc.soniclabs.com",
+        "chain_id": 146,
+        "native_token": "Sonic",
+        "explorer_url": "https://sonicscan.org/",
+        "alternative_rpcs": [
+            "https://sonic.drpc.org",
+            "https://sonic-rpc.publicnode.com"
+        ]
+    },
+    "token": {
+        "contract_address": "YOUR_TOKEN_TO_BUY_CONTRACT_ADDRESS",
+        "name": "YOUR_TOKEN_NAME",
+        "symbol": "YOUR_TOKEN_SYMBOL"
+    },
+    "transaction": {
+        "buy_amount": 1e-10,
+        "transfer_percentage": 0.9988,
+        "gas_multiplier": 1.1,
+        "wait_time": 10,
+        "max_retries": 3,
+        "backoff_factor": 2
+    },
+    "wallets": [
+        {
+            "address": "YOUR_INITIAL_WALLET_ADDRESS",
+            "private_key": "YOUR_INITIAL_WALLET_PRIVATE_KEY"
+        }
+       
+    ]
+}
