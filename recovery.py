@@ -7,6 +7,7 @@ from web3 import Web3
 from eth_account import Account
 import requests
 from requests.exceptions import RequestException
+import argparse
 
 # Configure logging
 logging.basicConfig(
@@ -51,14 +52,16 @@ def retry_with_backoff(max_retries=5, backoff_factor=1.5):
     return decorator
 
 class WalletRecovery:
-    def __init__(self, config_file='config.json', destination_address=None):
+    def __init__(self, chain_name, config_file='config.json', destination_address=None):
         """
         Initialize the wallet recovery tool
         
         Args:
+            chain_name: Name of the chain to recover from (e.g., 'sonic', 'ethereum')
             config_file: Path to the config file containing wallets and settings
             destination_address: Address to send all recovered funds to
         """
+        self.chain_name = chain_name
         self.config_file = config_file
         self.load_config()
         
@@ -75,10 +78,11 @@ class WalletRecovery:
             raise ConnectionError(f"Could not connect to any RPC endpoint")
             
         logger.info(f"Connected to network: {self.w3.eth.chain_id}")
-        logger.info(f"Using native token: {self.config['chain']['native_token']}")
+        logger.info(f"Using native token: {self.chain_config['native_token']}")
         
-        # Token contract for DAWAE
-        self.token_contract_address = self.config['token']['contract_address']
+        # Token contract setup
+        self.token_contract_address = next(iter(self.chain_config['token'].values()))['contract_address']
+        self.token_symbol = next(iter(self.chain_config['token'].values()))['symbol']
         self.token_abi = [
             {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "payable": False, "stateMutability": "view", "type": "function"},
             {"inputs": [{"internalType": "address", "name": "spender", "type": "address"}, {"internalType": "uint256", "name": "amount", "type": "uint256"}], "name": "approve", "outputs": [{"internalType": "bool", "name": "", "type": "bool"}], "stateMutability": "nonpayable", "type": "function"},
@@ -104,7 +108,13 @@ class WalletRecovery:
             with open(self.config_file, 'r') as f:
                 self.config = json.load(f)
                 
+            if self.chain_name not in self.config['chains']:
+                raise ValueError(f"Chain '{self.chain_name}' not found in config file")
+                
+            self.chain_config = self.config['chains'][self.chain_name]
             self.wallets = self.config.get('wallets', [])
+            
+            logger.info(f"Loaded configuration for chain: {self.chain_name}")
             logger.info(f"Loaded {len(self.wallets)} wallets from config file")
             
             if not self.wallets:
@@ -116,7 +126,7 @@ class WalletRecovery:
 
     def _get_web3_connection(self):
         """Get a Web3 connection, trying alternative RPCs if needed"""
-        all_rpcs = [self.config['chain']['rpc_url']] + self.config['chain'].get('alternative_rpcs', [])
+        all_rpcs = [self.chain_config['rpc_url']] + self.chain_config.get('alternative_rpcs', [])
         
         # Try the current RPC first
         rpc_url = all_rpcs[self.current_rpc_index % len(all_rpcs)]
@@ -163,7 +173,7 @@ class WalletRecovery:
             address = self.w3.to_checksum_address(address)
             balance = self.token_contract.functions.balanceOf(address).call()
             formatted_balance = balance / (10 ** self.token_decimals)
-            logger.info(f"Token balance for {address}: {formatted_balance} {self.config['token']['symbol']}")
+            logger.info(f"Token balance for {address}: {formatted_balance} {self.token_symbol}")
             return balance, formatted_balance
         except Exception as e:
             logger.error(f"Error checking token balance: {e}")
@@ -185,7 +195,7 @@ class WalletRecovery:
         try:
             balance = self.w3.eth.get_balance(address)
             balance_in_eth = self.w3.from_wei(balance, 'ether')
-            logger.info(f"Native balance for {address}: {balance_in_eth} {self.config['chain']['native_token']}")
+            logger.info(f"Native balance for {address}: {balance_in_eth} {self.chain_config['native_token']}")
             return balance, balance_in_eth
         except Exception as e:
             logger.error(f"Error checking native balance: {e}")
@@ -216,7 +226,7 @@ class WalletRecovery:
                 logger.info(f"No tokens to transfer from {from_address}")
                 return False
                 
-            logger.info(f"Transferring {formatted_balance} {self.config['token']['symbol']} from {from_address} to {to_address}")
+            logger.info(f"Transferring {formatted_balance} {self.token_symbol} from {from_address} to {to_address}")
             
             # Get nonce
             nonce = self.w3.eth.get_transaction_count(from_address)
@@ -230,7 +240,7 @@ class WalletRecovery:
                 'gas': 100000,  # Standard ERC20 transfer gas
                 'gasPrice': self.w3.eth.gas_price,
                 'nonce': nonce,
-                'chainId': self.config['chain']['chain_id']
+                'chainId': self.chain_config['chain_id']
             })
             
             # Try to estimate gas to ensure transaction will succeed
@@ -306,7 +316,7 @@ class WalletRecovery:
             
             # Calculate gas cost
             gas_cost = gas_estimate * gas_price
-            logger.info(f"Estimated gas cost: {self.w3.from_wei(gas_cost, 'ether')} {self.config['chain']['native_token']}")
+            logger.info(f"Estimated gas cost: {self.w3.from_wei(gas_cost, 'ether')} {self.chain_config['native_token']}")
             
             # Calculate amount to send after deducting gas fee
             amount = balance - gas_cost
@@ -317,7 +327,7 @@ class WalletRecovery:
                 
             # Apply a small safety margin (99.5% of available amount)
             transfer_amount = int(amount * 0.995)
-            logger.info(f"Transfer amount after applying safety margin: {self.w3.from_wei(transfer_amount, 'ether')} {self.config['chain']['native_token']}")
+            logger.info(f"Transfer amount after applying safety margin: {self.w3.from_wei(transfer_amount, 'ether')} {self.chain_config['native_token']}")
             
             # Get nonce
             nonce = self.w3.eth.get_transaction_count(from_address)
@@ -330,7 +340,7 @@ class WalletRecovery:
                 "gas": gas_estimate,
                 "gasPrice": gas_price,
                 "nonce": nonce,
-                "chainId": self.config['chain']['chain_id']
+                "chainId": self.chain_config['chain_id']
             }
             
             # Sign and send transaction
@@ -341,7 +351,7 @@ class WalletRecovery:
             # Wait for receipt
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
             if receipt['status'] == 1:
-                logger.info(f"Native transfer successful: {self.w3.from_wei(transfer_amount, 'ether')} {self.config['chain']['native_token']}")
+                logger.info(f"Native transfer successful: {self.w3.from_wei(transfer_amount, 'ether')} {self.chain_config['native_token']}")
                 return True
             else:
                 logger.error(f"Native transfer failed with status: {receipt['status']}")
@@ -362,7 +372,7 @@ class WalletRecovery:
         1. First recover all tokens from all wallets
         2. Then recover all native tokens from all wallets
         """
-        logger.info(f"Starting recovery of all funds to {self.destination_address}")
+        logger.info(f"Starting recovery of all funds on {self.chain_name} to {self.destination_address}")
         
         # Skip the destination wallet if it's in our list
         wallets_to_process = [w for w in self.wallets if w['address'].lower() != self.destination_address.lower()]
@@ -415,17 +425,26 @@ class WalletRecovery:
         _, token_balance = self.check_token_balance(self.destination_address)
         _, native_balance = self.check_native_balance(self.destination_address)
         
-        logger.info(f"Final destination address balances:")
-        logger.info(f"  - {token_balance} {self.config['token']['symbol']}")
-        logger.info(f"  - {native_balance} {self.config['chain']['native_token']}")
+        logger.info(f"Final destination address balances on {self.chain_name}:")
+        logger.info(f"  - {token_balance} {self.token_symbol}")
+        logger.info(f"  - {native_balance} {self.chain_config['native_token']}")
 
 
 if __name__ == "__main__":
     try:
+        # Set up argument parser
+        parser = argparse.ArgumentParser(description='Recover funds from wallets')
+        parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum)')
+        parser.add_argument('--destination', '-d', help='Destination address for recovered funds')
+        args = parser.parse_args()
+
         # You can specify a custom destination address here, or leave it as None to use the first wallet
-        destination_address = "0xE9f351199e137aDa760031138021ee6FE6093b6B"  # e.g. "0x090E8B4c45A68F3A39B96dB6a60241AeAdD8636e"
+        destination_address = args.destination or None
         
-        recovery = WalletRecovery(destination_address=destination_address)
+        recovery = WalletRecovery(
+            chain_name=args.chain,
+            destination_address=destination_address
+        )
         recovery.recover_all_funds()
     except Exception as e:
         logger.critical(f"Fatal error: {e}")

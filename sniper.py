@@ -1,38 +1,80 @@
+import argparse
+import json
+import logging
 from web3 import Web3
 from hexbytes import HexBytes
 import time
 import asyncio
 import random
-import logging
-import json
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Sonic DEX router address - make sure this is the correct router for Sonic chain
-uniSwap = "0x1D368773735ee1E678950B7A97bcA2CafB330CDc"
+class Config:
+    def __init__(self, chain_name):
+        """Initialize configuration for specified chain"""
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+            
+        if chain_name not in config['chains']:
+            raise ValueError(f"Chain '{chain_name}' not found in config.json")
+            
+        chain_config = config['chains'][chain_name]
+        
+        self.rpc_url = chain_config['rpc_url']
+        self.chain_id = chain_config['chain_id']
+        self.router_address = chain_config['dex']['router_address']
+        self.router_abi = chain_config['dex']['router_abi']
+        self.wrapped_native_token = chain_config['dex']['wrapped_native_token']
+        self.token_contract = next(iter(chain_config['token'].values()))['contract_address']
 
-# ABI for router contract
-abi = [{"inputs":[{"internalType":"address","name":"_factory","type":"address"},{"internalType":"address","name":"_weth","type":"address"}],"stateMutability":"nonpayable","type":"constructor"},{"inputs":[],"name":"ETH_TRANSFER_FAILED","type":"error"},{"inputs":[],"name":"EXCESSIVE_INPUT_AMOUNT","type":"error"},{"inputs":[],"name":"EXPIRED","type":"error"},{"inputs":[],"name":"IDENTICAL","type":"error"},{"inputs":[],"name":"INSUFFICIENT_AMOUNT","type":"error"},{"inputs":[],"name":"INSUFFICIENT_A_AMOUNT","type":"error"},{"inputs":[],"name":"INSUFFICIENT_B_AMOUNT","type":"error"},{"inputs":[],"name":"INSUFFICIENT_LIQUIDITY","type":"error"},{"inputs":[],"name":"INSUFFICIENT_OUTPUT_AMOUNT","type":"error"},{"inputs":[],"name":"INVALID_PATH","type":"error"},{"inputs":[],"name":"INVALID_RESERVES","type":"error"},{"inputs":[],"name":"ZERO_ADDRESS","type":"error"},{"inputs":[],"name":"WETH","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"amountADesired","type":"uint256"},{"internalType":"uint256","name":"amountBDesired","type":"uint256"},{"internalType":"uint256","name":"amountAMin","type":"uint256"},{"internalType":"uint256","name":"amountBMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"addLiquidity","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"amountADesired","type":"uint256"},{"internalType":"uint256","name":"amountBDesired","type":"uint256"},{"internalType":"uint256","name":"amountAMin","type":"uint256"},{"internalType":"uint256","name":"amountBMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"addLiquidityAndStake","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"amountTokenDesired","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"addLiquidityETH","outputs":[{"internalType":"uint256","name":"amountToken","type":"uint256"},{"internalType":"uint256","name":"amountETH","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"amountTokenDesired","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"addLiquidityETHAndStake","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"payable","type":"function"},{"inputs":[],"name":"factory","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"}],"name":"getAmountOut","outputs":[{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"bool","name":"stable","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"}],"name":"getAmountsIn","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"}],"name":"getAmountsOut","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"name":"getReserves","outputs":[{"internalType":"uint256","name":"reserveA","type":"uint256"},{"internalType":"uint256","name":"reserveB","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"name":"pairFor","outputs":[{"internalType":"address","name":"pair","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"amountADesired","type":"uint256"},{"internalType":"uint256","name":"amountBDesired","type":"uint256"}],"name":"quoteAddLiquidity","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"liquidity","type":"uint256"}],"name":"quoteRemoveLiquidity","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountAMin","type":"uint256"},{"internalType":"uint256","name":"amountBMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"removeLiquidity","outputs":[{"internalType":"uint256","name":"amountA","type":"uint256"},{"internalType":"uint256","name":"amountB","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"removeLiquidityETH","outputs":[{"internalType":"uint256","name":"amountToken","type":"uint256"},{"internalType":"uint256","name":"amountETH","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"token","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"uint256","name":"liquidity","type":"uint256"},{"internalType":"uint256","name":"amountTokenMin","type":"uint256"},{"internalType":"uint256","name":"amountETHMin","type":"uint256"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"removeLiquidityETHSupportingFeeOnTransferTokens","outputs":[{"internalType":"uint256","name":"amountToken","type":"uint256"},{"internalType":"uint256","name":"amountETH","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},{"internalType":"address","name":"tokenB","type":"address"}],"name":"sortTokens","outputs":[{"internalType":"address","name":"token0","type":"address"},{"internalType":"address","name":"token1","type":"address"}],"stateMutability":"pure","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapETHForExactTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactETHForTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactETHForTokensSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForETH","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForETHSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForTokensSupportingFeeOnTransferTokens","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint256","name":"amountInMax","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapTokensForExactETH","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint256","name":"amountInMax","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"}],"internalType":"struct IRouter.route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapTokensForExactTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},{"stateMutability":"payable","type":"receive"}]
+# Global variables that will be initialized based on config
+config = None
+web3 = None
+contract = None
+eth = None  # Will hold wrapped native token address
+uniSwap = None  # Will hold router address
+rpc = None # Will hold rpc url
 
+def init_globals(chain_name):
+    """Initialize global variables based on chain configuration"""
+    global config, web3, contract, eth, uniSwap, rpc
+    
+    try:
+        config = Config(chain_name)
+        rpc = config.rpc_url
+        web3 = Web3(Web3.HTTPProvider(config.rpc_url))
+        
+        if not web3.is_connected():
+            raise ConnectionError(f"Failed to connect to RPC: {config.rpc_url}")
+            
+        uniSwap = config.router_address
+        eth = config.wrapped_native_token
+        
+        # Initialize the contract with the router address and ABI
+        contract = web3.eth.contract(
+            address=web3.to_checksum_address(uniSwap), 
+            abi=config.router_abi
+        )
+        
+        logger.info(f"Initialized for chain: {chain_name}")
+        logger.info(f"Connected to RPC: {config.rpc_url}")
+        logger.info(f"Router address: {uniSwap}")
+        logger.info(f"Wrapped token: {eth}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error initializing globals: {e}")
+        raise
 
-
-# ABI for token contract
+# Token ABI remains unchanged
 tokenAbi = [
     {"constant":True,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"payable":False,"stateMutability":"view","type":"function"},
     {"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
     {"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
 ]
 
-# Sonic chain RPC URL
-rpc = "https://rpc.soniclabs.com"
-
-# Wrapped Sonic token address
-eth = "0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38"
-
-# Initialize web3
-web3 = Web3(Web3.HTTPProvider(rpc))
-contract = web3.eth.contract(address=uniSwap, abi=abi)
 tempHashes = []
 
 def ExactTokensSwap(_ethAmount, _amountOut, _tokenContract, _autoDecimals, _sender, _pk, _gas):
@@ -108,7 +150,7 @@ def ExactTokensSwap(_ethAmount, _amountOut, _tokenContract, _autoDecimals, _send
 
 def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas, max_retries=3):
     """
-    Swap exact ETH for tokens using Sonic's router
+    Swap exact ETH for tokens using DEX router
     """
     for attempt in range(1, max_retries + 1):
         try:
@@ -129,7 +171,7 @@ def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas, max_retries=3):
                 logger.error(f"Insufficient balance: {web3.from_wei(sender_balance, 'ether')} ETH, needed: {_ethAmount} ETH")
                 return False
             
-            # Create the route structure that Sonic expects
+            # Create the route structure that DEX expects
             routes = [{"from": eth, "to": _tokenContract, "stable": False}]
             
             # Build transaction using the correct function and route structure
@@ -144,7 +186,7 @@ def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas, max_retries=3):
                 'gas': 1000000,
                 'gasPrice': web3.to_wei(_gas, 'gwei'),
                 'nonce': nonce,
-                'chainId': 146  # Sonic chain ID
+                'chainId': config.chain_id  # Use chain ID from config
             })
             
             logger.info(f"Transaction built: {tx}")
@@ -303,37 +345,51 @@ async def scannerPending():
                     tempHashes.append(x['hash'].hex())
 
 def check_pair_exists(_tokenContract):
-    """Check if a token pair exists on the DEX using Sonic's specific function signature"""
+    """Check if a token pair exists on the DEX using specific function signature"""
     try:
+        # Ensure contract is initialized
+        if contract is None:
+            logger.error("Contract not initialized. Please call init_globals first.")
+            return False
+            
         _tokenContract = web3.to_checksum_address(_tokenContract)
         
-        # Create the route structure that Sonic expects
+        # Create the route structure that DEX expects
         routes = [{"from": eth, "to": _tokenContract, "stable": False}]
         
         # Try to get the amounts out for a small amount of ETH
-        amounts = contract.functions.getAmountsOut(
-            web3.to_wei(0.001, 'ether'),
-            routes
-        ).call()
-        
-        logger.info(f"Pair exists. Expected output for 0.001 ETH: {amounts[1]} tokens")
-        return True
+        try:
+            amounts = contract.functions.getAmountsOut(
+                web3.to_wei(0.001, 'ether'),
+                routes
+            ).call()
+            
+            logger.info(f"Pair exists. Expected output for 0.001 ETH: {amounts[1]} tokens")
+            return True
+        except Exception as e:
+            logger.info(f"Pair does not exist: {e}")
+            return False
+            
     except Exception as e:
-        logger.error(f"Pair does not exist or has an issue: {e}")
+        logger.error(f"Error checking pair existence: {e}")
         return False
 
-'''
-if mode=="y":
-  loop = asyncio.get_event_loop()
-  loop.run_until_complete(scannerPending())
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='DEX trading bot')
+    parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum)')
+    parser.add_argument('mode', choices=['y', 'n'], help='Trading mode')
+    args = parser.parse_args()
 
-if mode=="n":
-  ExactTokensSwap(amountToBuy,tokenToBuy,sender_address1,pk1)
-  ExactTokensSwap(amountToBuy,tokenToBuy,sender_address2,pk2)
-  #ExactTokensSwap(amountToBuy,tokenToBuy,sender_address3,pk3)
-  #ExactTokensSwap(amountToBuy,tokenToBuy,sender_address4,pk4)
+    # Initialize configuration and globals
+    init_globals(args.chain)
 
-'''
+    if args.mode == "y":
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(scannerPending())
+    elif args.mode == "n":
+        # You'll need to modify this part based on how you want to handle wallet information
+        # Maybe load it from config or take as additional arguments
+        ExactTokensSwap(amountToBuy, tokenToBuy, sender_address1, pk1)
 
 
 

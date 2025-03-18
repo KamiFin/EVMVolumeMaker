@@ -8,6 +8,7 @@ from eth_account import Account
 import sniper
 import requests
 from requests.exceptions import RequestException
+import argparse
 
 # Configure logging
 logging.basicConfig(
@@ -43,34 +44,46 @@ def retry_with_backoff(max_retries=5, backoff_factor=1.5):
 
 # Configuration
 class Config:
-    def __init__(self):
+    def __init__(self, chain_name):
+        """Initialize configuration for specified chain"""
         with open('config.json', 'r') as f:
             config = json.load(f)
+            
+        if chain_name not in config['chains']:
+            raise ValueError(f"Chain '{chain_name}' not found in config.json")
+            
+        chain_config = config['chains'][chain_name]
         
         # Chain configuration
-        self.RPC_URL = config['chain']['rpc_url']
-        self.ALTERNATIVE_RPCS = config['chain'].get('alternative_rpcs', [])
-        self.CHAIN_ID = config['chain']['chain_id']
-        self.NATIVE_TOKEN = config['chain']['native_token']
+        self.RPC_URL = chain_config['rpc_url']
+        self.ALTERNATIVE_RPCS = chain_config.get('alternative_rpcs', [])
+        self.CHAIN_ID = chain_config['chain_id']
+        self.NATIVE_TOKEN = chain_config['native_token']
+        
+        # DEX configuration
+        self.ROUTER_ADDRESS = chain_config['dex']['router_address']
+        self.ROUTER_ABI = chain_config['dex']['router_abi']
+        self.WRAPPED_NATIVE_TOKEN = chain_config['dex']['wrapped_native_token']
         
         # Token configuration
-        self.TOKEN_CONTRACT = config['token']['contract_address']
+        self.TOKEN_CONTRACT = next(iter(chain_config['token'].values()))['contract_address']
         
         # Transaction configuration
-        self.BUY_AMOUNT = config['transaction']['buy_amount']
-        self.TRANSFER_PERCENTAGE = config['transaction']['transfer_percentage']
-        self.GAS_MULTIPLIER = config['transaction']['gas_multiplier']
-        self.WAIT_TIME = config['transaction']['wait_time']
-        self.MAX_RETRIES = config['transaction'].get('max_retries', 3)
-        self.BACKOFF_FACTOR = config['transaction'].get('backoff_factor', 2)
+        self.BUY_AMOUNT = chain_config['transaction']['buy_amount']
+        self.TRANSFER_PERCENTAGE = chain_config['transaction']['transfer_percentage']
+        self.GAS_MULTIPLIER = chain_config['transaction']['gas_multiplier']
+        self.WAIT_TIME = chain_config['transaction']['wait_time']
+        self.MAX_RETRIES = chain_config['transaction'].get('max_retries', 3)
+        self.BACKOFF_FACTOR = chain_config['transaction'].get('backoff_factor', 2)
         
         # File paths
         self.CONFIG_FILE = 'config.json'
 
 class VolumeMaker:
-    def __init__(self):
+    def __init__(self, chain_name):
         """Initialize the volume maker with web3 connection and wallet management."""
-        self.config = Config()
+        self.config = Config(chain_name)
+        self.chain_name = chain_name
         self.current_rpc_index = 0
         self.w3 = self._get_web3_connection()
         
@@ -226,8 +239,8 @@ class VolumeMaker:
             
             logger.info(f"Buying tokens with wallet {current_wallet['address']}")
             
-            # Update sniper.py RPC URL to match our config
-            sniper.web3 = Web3(Web3.HTTPProvider(self.config.RPC_URL))
+            # Initialize sniper with the current chain configuration
+            sniper.init_globals(self.chain_name)
             
             # Use a higher amount for the transaction to ensure it goes through
             buy_amount = 0.001  # Use a higher amount that will be visible on-chain
@@ -394,8 +407,12 @@ class VolumeMaker:
                     self.index = 0
                     return False
             
+            # Initialize sniper with current chain configuration
+            logger.info("Initializing sniper module...")
+            sniper.init_globals(self.chain_name)
+            
             # Check if the token pair exists on the DEX
-            sniper.web3 = Web3(Web3.HTTPProvider(self.config.RPC_URL))
+            logger.info("Checking if token pair exists...")
             if not sniper.check_pair_exists(self.config.TOKEN_CONTRACT):
                 logger.error(f"Token pair does not exist on the DEX. Please create liquidity first.")
                 return False
@@ -459,7 +476,12 @@ class VolumeMaker:
 
 if __name__ == "__main__":
     try:
-        maker = VolumeMaker()
+        # Set up argument parser
+        parser = argparse.ArgumentParser(description='Volume maker for DEX trading')
+        parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum)')
+        args = parser.parse_args()
+
+        maker = VolumeMaker(args.chain)
         maker.run()
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
