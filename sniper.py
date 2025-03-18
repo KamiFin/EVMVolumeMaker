@@ -19,14 +19,15 @@ class Config:
         if chain_name not in config['chains']:
             raise ValueError(f"Chain '{chain_name}' not found in config.json")
             
-        chain_config = config['chains'][chain_name]
+        self.chain_config = config['chains'][chain_name]
         
-        self.rpc_url = chain_config['rpc_url']
-        self.chain_id = chain_config['chain_id']
-        self.router_address = chain_config['dex']['router_address']
-        self.router_abi = chain_config['dex']['router_abi']
-        self.wrapped_native_token = chain_config['dex']['wrapped_native_token']
-        self.token_contract = next(iter(chain_config['token'].values()))['contract_address']
+        self.rpc_url = self.chain_config['rpc_url']
+        self.chain_id = self.chain_config['chain_id']
+        self.router_address = self.chain_config['dex']['router_address']
+        self.router_abi = self.chain_config['dex']['router_abi']
+        self.wrapped_native_token = self.chain_config['dex']['wrapped_native_token']
+        self.token_contract = next(iter(self.chain_config['token'].values()))['contract_address']
+        self.dex_type = self.chain_config.get('dex_type', 'uniswap')  # Default to uniswap for backward compatibility
 
 # Global variables that will be initialized based on config
 config = None
@@ -35,10 +36,11 @@ contract = None
 eth = None  # Will hold wrapped native token address
 uniSwap = None  # Will hold router address
 rpc = None # Will hold rpc url
+dex_type = None  # Will hold DEX type
 
 def init_globals(chain_name):
     """Initialize global variables based on chain configuration"""
-    global config, web3, contract, eth, uniSwap, rpc
+    global config, web3, contract, eth, uniSwap, rpc, dex_type
     
     try:
         config = Config(chain_name)
@@ -51,6 +53,9 @@ def init_globals(chain_name):
         uniSwap = config.router_address
         eth = config.wrapped_native_token
         
+        # Determine DEX type - default to 'uniswap' if not specified
+        dex_type = config.dex_type
+        
         # Initialize the contract with the router address and ABI
         contract = web3.eth.contract(
             address=web3.to_checksum_address(uniSwap), 
@@ -61,6 +66,7 @@ def init_globals(chain_name):
         logger.info(f"Connected to RPC: {config.rpc_url}")
         logger.info(f"Router address: {uniSwap}")
         logger.info(f"Wrapped token: {eth}")
+        logger.info(f"DEX type: {dex_type}")
         
         return True
         
@@ -171,23 +177,44 @@ def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas, max_retries=3):
                 logger.error(f"Insufficient balance: {web3.from_wei(sender_balance, 'ether')} ETH, needed: {_ethAmount} ETH")
                 return False
             
-            # Create the route structure that DEX expects
-            routes = [{"from": eth, "to": _tokenContract, "stable": False}]
+            # Build transaction based on DEX type
+            deadline = (int(time.time()) + 10000)
             
-            # Build transaction using the correct function and route structure
-            tx = contract.functions.swapExactETHForTokens(
-                0,  # amountOutMin - accept any amount of tokens
-                routes,
-                _sender,
-                (int(time.time()) + 10000)
-            ).build_transaction({
-                'from': _sender,
-                'value': web3.to_wei(float(_ethAmount), 'ether'),
-                'gas': 1000000,
-                'gasPrice': web3.to_wei(_gas, 'gwei'),
-                'nonce': nonce,
-                'chainId': config.chain_id  # Use chain ID from config
-            })
+            if dex_type == 'shadow':
+                # Create the route structure that Sonic expects
+                routes = [{"from": eth, "to": _tokenContract, "stable": False}]
+                
+                # Build transaction using the correct function and route structure
+                tx = contract.functions.swapExactETHForTokens(
+                    0,  # amountOutMin - accept any amount of tokens
+                    routes,
+                    _sender,
+                    deadline
+                ).build_transaction({
+                    'from': _sender,
+                    'value': web3.to_wei(float(_ethAmount), 'ether'),
+                    'gas': 1000000,
+                    'gasPrice': web3.to_wei(_gas, 'gwei'),
+                    'nonce': nonce,
+                    'chainId': config.chain_id
+                })
+            else:
+                # Standard Uniswap V2 interface uses a simple array of addresses
+                path = [eth, _tokenContract]
+                
+                tx = contract.functions.swapExactETHForTokens(
+                    0,  # amountOutMin - accept any amount of tokens
+                    path,
+                    _sender,
+                    deadline
+                ).build_transaction({
+                    'from': _sender,
+                    'value': web3.to_wei(float(_ethAmount), 'ether'),
+                    'gas': 1000000,
+                    'gasPrice': web3.to_wei(_gas, 'gwei'),
+                    'nonce': nonce,
+                    'chainId': config.chain_id
+                })
             
             logger.info(f"Transaction built: {tx}")
             logger.info("Signing transaction...")
@@ -354,15 +381,22 @@ def check_pair_exists(_tokenContract):
             
         _tokenContract = web3.to_checksum_address(_tokenContract)
         
-        # Create the route structure that DEX expects
-        routes = [{"from": eth, "to": _tokenContract, "stable": False}]
-        
-        # Try to get the amounts out for a small amount of ETH
+        # Different DEX types have different function signatures
         try:
-            amounts = contract.functions.getAmountsOut(
-                web3.to_wei(0.001, 'ether'),
-                routes
-            ).call()
+            if dex_type == 'shadow':
+                # Sonic uses a route structure with from, to, stable properties
+                routes = [{"from": eth, "to": _tokenContract, "stable": False}]
+                amounts = contract.functions.getAmountsOut(
+                    web3.to_wei(0.001, 'ether'),
+                    routes
+                ).call()
+            else:
+                # Standard Uniswap V2 interface uses a simple array of addresses
+                path = [eth, _tokenContract]
+                amounts = contract.functions.getAmountsOut(
+                    web3.to_wei(0.001, 'ether'),
+                    path
+                ).call()
             
             logger.info(f"Pair exists. Expected output for 0.001 ETH: {amounts[1]} tokens")
             return True

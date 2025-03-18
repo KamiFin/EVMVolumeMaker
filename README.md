@@ -136,6 +136,23 @@ Or use the default destination (first wallet in config):
 python recovery.py sonic
 ```
 
+By default, the first wallet in your config is preserved and excluded from recovery. To include it:
+```bash
+python recovery.py sonic --include-first
+```
+
+## Chain-Specific Considerations
+The tools automatically adapt to different chains:
+- BSC: Applies PoA middleware, optimizes gas prices (capped at 5 Gwei), uses higher gas limits for token transfers
+- Polygon: Uses minimum gas prices of 30 Gwei to prevent stuck transactions
+- Base: Uses lower gas prices suitable for L2
+- Sonic: Handles specialized DEX interface structure
+
+## Special Token Handling
+Some tokens require special handling due to their transfer mechanisms:
+- DAWAE Token: Uses 200,000 gas limit on BSC (instead of standard 100,000)
+- Tokens with Transfer Fees: Scripts automatically handle tokens with transfer taxes/fees
+
 ## Script Descriptions
 
 ### maker.py
@@ -154,19 +171,41 @@ python recovery.py sonic
 
 ### recovery.py
 - Recovers both native and ERC20 tokens
-- Supports multiple chains
-- Includes gas optimization
-- Handles failed transactions
-- Comprehensive balance checking
+- Multi-phase recovery strategy:
+  - First recovers tokens from wallets with sufficient gas
+  - Recovers native tokens from wallets with significant balances
+  - Funds wallets with tokens but insufficient gas
+  - Finally sweeps all remaining native tokens
+- Adaptive gas strategies
+- Chain-specific optimizations
+- Token-specific handling
 
 ## Safety Features
 
 - Gas price monitoring and adjustment
+- Adaptive safety margins for native token transfers
 - Transaction retry mechanism with backoff
 - Balance checks before transactions
 - RPC failover handling
 - Comprehensive error logging
-- Safety margins for native token transfers
+- Protection of first wallet (designated as the main wallet)
+
+## Troubleshooting
+
+### Common Issues
+
+- Out of Gas Errors:
+  - For tokens like DAWAE, increase gas limit to 200,000+
+  - In config.json, add a higher gas limit for specific chains
+- PoA Chain Errors:
+  - The script automatically applies PoA middleware for BSC and Polygon
+If you see errors about "extraData", check that middleware is correctly applied
+Unable to Recover Tokens:
+Ensure destination wallet has enough native tokens to fund other wallets
+Check token contract is valid and supports standard ERC20 functions
+RPC Connection Issues:
+Add multiple alternative RPCs in your config
+The script will automatically rotate through available endpoints
 
 ## Error Handling
 
