@@ -1,4 +1,4 @@
-# Blockchain Trading and Recovery Tools
+# EVM Chains | Trading and Recovery Tools
 
 A collection of Python scripts for automated trading and fund recovery on various blockchain networks. This project includes tools for volume making, token sniping, and wallet recovery operations.
 
