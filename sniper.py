@@ -7,6 +7,7 @@ import time
 import asyncio
 import random
 from utils.gas_manager import GasManager
+from utils.web3_utils import get_web3_connection
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -47,12 +48,14 @@ def init_globals(chain_name):
     try:
         config = Config(chain_name)
         rpc = config.rpc_url
-        web3 = Web3(Web3.HTTPProvider(config.rpc_url))
+        
+        # Initialize web3 with proper middleware
+        web3 = get_web3_connection(config.rpc_url, config.chain_id)
         
         if not web3.is_connected():
             raise ConnectionError(f"Failed to connect to RPC: {config.rpc_url}")
             
-        # Initialize gas manager
+        # Initialize gas manager after web3 is properly configured
         config.gas_manager = GasManager(web3, config.chain_id)
         
         uniSwap = config.router_address

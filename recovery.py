@@ -11,6 +11,7 @@ import argparse
 from web3.middleware import geth_poa_middleware
 import sys
 from utils.gas_manager import GasManager
+from utils.web3_utils import get_web3_connection
 
 # Configure logging
 logging.basicConfig(
@@ -73,9 +74,8 @@ class WalletRecovery:
         self.destination_address = destination_address or self.wallets[0]['address']
         logger.info(f"Destination address set to: {self.destination_address}")
         
-        # Initialize Web3 connection
-        self.current_rpc_index = 0
-        self.w3 = self._get_web3_connection()
+        # Initialize web3 with proper middleware
+        self.w3 = get_web3_connection(self.chain_config['rpc_url'], self.chain_config['chain_id'])
         
         if not self.w3.is_connected():
             logger.error(f"Failed to connect to any RPC endpoint")
@@ -106,6 +106,7 @@ class WalletRecovery:
             logger.warning(f"Could not get token decimals: {e}. Using default of 18.")
             self.token_decimals = 18
 
+        # Initialize gas manager
         self.gas_manager = GasManager(self.w3, self.chain_config['chain_id'])
 
     def load_config(self):

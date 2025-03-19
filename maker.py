@@ -10,6 +10,8 @@ import requests
 from requests.exceptions import RequestException
 import argparse
 from utils.gas_manager import GasManager
+from web3.middleware import geth_poa_middleware
+from utils.web3_utils import get_web3_connection
 
 # Configure logging
 logging.basicConfig(
@@ -113,7 +115,7 @@ class VolumeMaker:
         
         # Try the current RPC first
         rpc_url = all_rpcs[self.current_rpc_index % len(all_rpcs)]
-        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        w3 = get_web3_connection(rpc_url, self.config.CHAIN_ID)
         
         # If it works, return it
         if w3.is_connected():
@@ -126,7 +128,7 @@ class VolumeMaker:
                 continue  # Skip the one we just tried
                 
             logger.info(f"Trying alternative RPC: {rpc}")
-            w3 = Web3(Web3.HTTPProvider(rpc))
+            w3 = get_web3_connection(rpc, self.config.CHAIN_ID)
             if w3.is_connected():
                 self.current_rpc_index = i
                 logger.info(f"Connected to alternative RPC: {rpc}")
