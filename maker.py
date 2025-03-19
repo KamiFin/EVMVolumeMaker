@@ -243,7 +243,7 @@ class VolumeMaker:
             sniper.init_globals(self.chain_name)
             
             # Use a higher amount for the transaction to ensure it goes through
-            buy_amount = 0.001  # Use a higher amount that will be visible on-chain
+            buy_amount = self.config.BUY_AMOUNT  # Use a higher amount that will be visible on-chain
             
             # Execute the buy transaction
             success = sniper.ExactETHSwap(
