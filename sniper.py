@@ -6,6 +6,7 @@ from hexbytes import HexBytes
 import time
 import asyncio
 import random
+from utils.gas_manager import GasManager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class Config:
         self.wrapped_native_token = self.chain_config['dex']['wrapped_native_token']
         self.token_contract = next(iter(self.chain_config['token'].values()))['contract_address']
         self.dex_type = self.chain_config.get('dex_type', 'uniswap')  # Default to uniswap for backward compatibility
+        self.gas_manager = None  # Will be initialized after web3 connection
 
 # Global variables that will be initialized based on config
 config = None
@@ -50,6 +52,9 @@ def init_globals(chain_name):
         if not web3.is_connected():
             raise ConnectionError(f"Failed to connect to RPC: {config.rpc_url}")
             
+        # Initialize gas manager
+        config.gas_manager = GasManager(web3, config.chain_id)
+        
         uniSwap = config.router_address
         eth = config.wrapped_native_token
         
@@ -154,69 +159,126 @@ def ExactTokensSwap(_ethAmount, _amountOut, _tokenContract, _autoDecimals, _send
         logger.error(f"Error in ExactTokensSwap: {e}")
         raise
 
-def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas, max_retries=3):
+def get_optimal_gas_price():
     """
-    Swap exact ETH for tokens using DEX router
+    Determine optimal gas price based on network conditions and chain requirements.
+    Returns gas price in Wei with safety margins.
+    """
+    try:
+        # Get base gas price from network
+        base_gas_price = web3.eth.gas_price
+        chain_id = config.chain_id
+        
+        # Get latest block for network congestion analysis
+        latest_block = web3.eth.get_block('latest')
+        
+        # Calculate dynamic multiplier based on block utilization
+        block_utilization = len(latest_block['transactions']) / 15000000  # Approximate max block size
+        dynamic_multiplier = 1 + (block_utilization * 0.2)  # Up to 20% increase based on congestion
+        
+        # Get max priority fee (for EIP-1559 compatible chains)
+        try:
+            max_priority_fee = web3.eth.max_priority_fee
+        except Exception:
+            max_priority_fee = 0
+            
+        # Calculate suggested gas price with dynamic adjustment
+        suggested_gas_price = int(base_gas_price * dynamic_multiplier) + max_priority_fee
+        
+        logger.info(f"Base gas price: {web3.from_wei(base_gas_price, 'gwei')} Gwei")
+        logger.info(f"Network congestion multiplier: {dynamic_multiplier}")
+        
+        return suggested_gas_price
+        
+    except Exception as e:
+        logger.error(f"Error getting optimal gas price: {e}")
+        return web3.eth.gas_price  # Fallback to network gas price
+
+def estimate_gas_limit(tx_params, contract_call=None):
+    """
+    Estimate optimal gas limit for a transaction with safety margins.
+    
+    Args:
+        tx_params (dict): Transaction parameters
+        contract_call: Optional contract function call for gas estimation
+    """
+    try:
+        # Get gas estimate either from contract call or direct transaction
+        if contract_call:
+            base_estimate = contract_call.estimate_gas(tx_params)
+        else:
+            base_estimate = web3.eth.estimate_gas(tx_params)
+            
+        # Get latest block gas limit for reference
+        block_gas_limit = web3.eth.get_block('latest')['gasLimit']
+        
+        # Calculate safe gas limit (add 20% margin)
+        safe_gas_limit = int(base_estimate * 1.2)
+        
+        # Ensure we don't exceed block gas limit
+        final_gas_limit = min(safe_gas_limit, block_gas_limit - 100000)  # Leave room for other txs
+        
+        logger.info(f"Base gas estimate: {base_estimate}")
+        logger.info(f"Safe gas limit: {final_gas_limit}")
+        
+        return final_gas_limit
+        
+    except Exception as e:
+        logger.error(f"Error estimating gas limit: {e}")
+        # Get average gas used in recent blocks as fallback
+        recent_blocks = [web3.eth.get_block(block) for block in range(
+            web3.eth.block_number - 3,
+            web3.eth.block_number
+        )]
+        avg_gas_used = sum(block['gasUsed'] for block in recent_blocks) // len(recent_blocks)
+        return min(avg_gas_used // 4, 500000)  # Conservative fallback
+
+def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas=None, max_retries=3):
+    """
+    Swap exact ETH for tokens using DEX router with dynamic gas optimization
     """
     for attempt in range(1, max_retries + 1):
         try:
             logger.info(f"Starting ExactETHSwap: {_ethAmount} ETH for token {_tokenContract}")
             
-            # Get current nonce - fetch fresh each time
+            # Get current nonce
             nonce = web3.eth.get_transaction_count(_sender)
-            logger.info(f"Using nonce: {nonce}")
             
-            _tokenContract = web3.to_checksum_address(_tokenContract)
+            # Get optimal gas price if not provided
+            gas_price = web3.to_wei(_gas, 'gwei') if _gas is not None else get_optimal_gas_price()
             
-            # Check sender balance
-            sender_balance = web3.eth.get_balance(_sender)
-            logger.info(f"Sender balance: {web3.from_wei(sender_balance, 'ether')} ETH")
+            # Build base transaction parameters
+            tx_params = {
+                'from': _sender,
+                'value': web3.to_wei(float(_ethAmount), 'ether'),
+                'nonce': nonce,
+                'chainId': config.chain_id
+            }
             
-            # Check if there's enough balance
-            if sender_balance < web3.to_wei(float(_ethAmount), 'ether'):
-                logger.error(f"Insufficient balance: {web3.from_wei(sender_balance, 'ether')} ETH, needed: {_ethAmount} ETH")
-                return False
+            # Use gas manager to prepare transaction params
+            tx_params = config.gas_manager.prepare_transaction_params(tx_params)
             
-            # Build transaction based on DEX type
-            deadline = (int(time.time()) + 10000)
-            
+            # Prepare the swap function call
             if dex_type == 'shadow':
-                # Create the route structure that Sonic expects
                 routes = [{"from": eth, "to": _tokenContract, "stable": False}]
-                
-                # Build transaction using the correct function and route structure
-                tx = contract.functions.swapExactETHForTokens(
-                    0,  # amountOutMin - accept any amount of tokens
-                    routes,
-                    _sender,
-                    deadline
-                ).build_transaction({
-                    'from': _sender,
-                    'value': web3.to_wei(float(_ethAmount), 'ether'),
-                    'gas': 1000000,
-                    'gasPrice': web3.to_wei(_gas, 'gwei'),
-                    'nonce': nonce,
-                    'chainId': config.chain_id
-                })
+                swap_function = contract.functions.swapExactETHForTokens(
+                    0, routes, _sender, (int(time.time()) + 10000)
+                )
             else:
-                # Standard Uniswap V2 interface uses a simple array of addresses
                 path = [eth, _tokenContract]
-                
-                tx = contract.functions.swapExactETHForTokens(
-                    0,  # amountOutMin - accept any amount of tokens
-                    path,
-                    _sender,
-                    deadline
-                ).build_transaction({
-                    'from': _sender,
-                    'value': web3.to_wei(float(_ethAmount), 'ether'),
-                    'gas': 1000000,
-                    'gasPrice': web3.to_wei(_gas, 'gwei'),
-                    'nonce': nonce,
-                    'chainId': config.chain_id
-                })
+                swap_function = contract.functions.swapExactETHForTokens(
+                    0, path, _sender, (int(time.time()) + 10000)
+                )
             
-            logger.info(f"Transaction built: {tx}")
+            # Estimate gas limit for this specific transaction
+            gas_limit = config.gas_manager.estimate_gas_limit(tx_params, swap_function)
+            tx_params['gas'] = gas_limit
+            
+            # Build final transaction
+            tx = swap_function.build_transaction(tx_params)
+            
+            logger.info(f"Transaction built with gas limit {gas_limit} and price {web3.from_wei(gas_price, 'gwei')} Gwei")
+            
             logger.info("Signing transaction...")
             signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
             
@@ -224,7 +286,7 @@ def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas, max_retries=3):
             tx_token = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
             
             logger.info(f"Transaction sent: {tx_token.hex()}")
-            receipt = web3.eth.wait_for_transaction_receipt(tx_token, timeout=60)
+            receipt = web3.eth.wait_for_transaction_receipt(tx_token)
             
             if receipt['status'] == 1:
                 logger.info("CONFIRMED: Transaction successful")

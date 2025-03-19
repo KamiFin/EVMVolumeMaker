@@ -9,6 +9,7 @@ import sniper
 import requests
 from requests.exceptions import RequestException
 import argparse
+from utils.gas_manager import GasManager
 
 # Configure logging
 logging.basicConfig(
@@ -103,6 +104,8 @@ class VolumeMaker:
         # Create initial wallet if none exists
         if not self.wallets:
             self._initialize()
+        
+        self.gas_manager = GasManager(self.w3, self.config.CHAIN_ID)
 
     def _get_web3_connection(self):
         """Get a Web3 connection, trying alternative RPCs if needed."""
@@ -244,6 +247,16 @@ class VolumeMaker:
             
             # Use a higher amount for the transaction to ensure it goes through
             buy_amount = self.config.BUY_AMOUNT  # Use a higher amount that will be visible on-chain
+            
+            # Use gas manager for transaction parameters
+            tx_params = {
+                'from': current_wallet['address'],
+                'value': self.w3.to_wei(buy_amount, 'ether'),
+                'nonce': self.w3.eth.get_transaction_count(current_wallet['address']),
+                'chainId': self.config.CHAIN_ID
+            }
+            
+            tx_params = self.gas_manager.prepare_transaction_params(tx_params)
             
             # Execute the buy transaction
             success = sniper.ExactETHSwap(

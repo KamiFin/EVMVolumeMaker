@@ -10,6 +10,7 @@ from requests.exceptions import RequestException
 import argparse
 from web3.middleware import geth_poa_middleware
 import sys
+from utils.gas_manager import GasManager
 
 # Configure logging
 logging.basicConfig(
@@ -104,6 +105,8 @@ class WalletRecovery:
         except Exception as e:
             logger.warning(f"Could not get token decimals: {e}. Using default of 18.")
             self.token_decimals = 18
+
+        self.gas_manager = GasManager(self.w3, self.chain_config['chain_id'])
 
     def load_config(self):
         """Load configuration from the config file"""
@@ -384,18 +387,22 @@ class WalletRecovery:
                 logger.warning(f"Insufficient funds for gas: have {self.w3.from_wei(native_balance, 'ether')} {self.chain_config['native_token']}, need {self.w3.from_wei(gas_cost, 'ether')}")
                 return False
             
+            # Use gas manager for transaction parameters
+            tx_params = {
+                'from': from_address,
+                'nonce': self.w3.eth.get_transaction_count(from_address),
+                'chainId': self.chain_config['chain_id']
+            }
+            
+            tx_params = self.gas_manager.prepare_transaction_params(tx_params)
+            gas_limit = self.gas_manager.estimate_gas_limit(tx_params)
+            tx_params['gas'] = gas_limit
+            
             # Build the actual transaction
-            nonce = self.w3.eth.get_transaction_count(from_address)
             tx = self.token_contract.functions.transfer(
                 to_address,
                 token_balance
-            ).build_transaction({
-                'from': from_address,
-                'gas': gas_limit,
-                'gasPrice': gas_price,
-                'nonce': nonce,
-                'chainId': self.chain_config['chain_id']
-            })
+            ).build_transaction(tx_params)
             
             # Sign and send transaction
             signed_tx = self.w3.eth.account.sign_transaction(tx, from_wallet['private_key'])
