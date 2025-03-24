@@ -121,21 +121,26 @@ class GasManager:
             logger.error(f"Error estimating gas limit: {e}")
             return self._get_fallback_gas_limit()
             
-    def prepare_transaction_params(self, base_params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Prepare transaction parameters with appropriate gas settings.
+    def prepare_transaction_params(self, tx_params):
+        """Prepare transaction parameters with appropriate gas settings"""
+        chain_id = tx_params.get('chainId', self.chain_id)
         
-        Args:
-            base_params: Base transaction parameters
-        """
+        # Use legacy transactions for L1 chains (Sonic and BSC)
+        if chain_id in [146, 56]:  # Sonic and BSC
+            gas_price = self.get_optimal_gas_price()
+            tx_params['gasPrice'] = gas_price
+            logger.info(f"Using legacy transaction format for L1 chain (ID: {chain_id}) with gas price: {self.web3.from_wei(gas_price, 'gwei')} Gwei")
+            return tx_params
+        
+        # For other chains, continue with existing logic...
         try:
             # Get chain-specific configurations
             chain_config = self.configure_chain_specifics()
             
             # BSC and some other chains don't support EIP-1559
-            if self.chain_id in [56, 97]:  # BSC Mainnet and Testnet
+            if chain_id in [56, 97]:  # BSC Mainnet and Testnet
                 gas_price = self.get_optimal_gas_price()
-                base_params['gasPrice'] = gas_price
+                tx_params['gasPrice'] = gas_price
                 logger.info(f"Using legacy gas price for BSC: {self.web3.from_wei(gas_price, 'gwei')} Gwei")
                 
             else:
@@ -147,7 +152,7 @@ class GasManager:
                         max_priority_fee = self.web3.eth.max_priority_fee
                         max_fee_per_gas = base_fee * 2 + max_priority_fee  # Double the base fee plus priority fee
                         
-                        base_params.update({
+                        tx_params.update({
                             'maxFeePerGas': max_fee_per_gas,
                             'maxPriorityFeePerGas': max_priority_fee,
                             'type': 2  # EIP-1559 transaction type
@@ -157,22 +162,22 @@ class GasManager:
                     else:
                         # Fallback to legacy transaction type
                         gas_price = self.get_optimal_gas_price()
-                        base_params['gasPrice'] = gas_price
+                        tx_params['gasPrice'] = gas_price
                         logger.info(f"Using legacy gas price: {self.web3.from_wei(gas_price, 'gwei')} Gwei")
                 except Exception as e:
                     logger.warning(f"Error setting EIP-1559 params: {e}, falling back to legacy gas price")
                     gas_price = self.get_optimal_gas_price()
-                    base_params['gasPrice'] = gas_price
+                    tx_params['gasPrice'] = gas_price
                     logger.info(f"Using fallback legacy gas price: {self.web3.from_wei(gas_price, 'gwei')} Gwei")
             
-            return base_params
+            return tx_params
             
         except Exception as e:
             logger.error(f"Error preparing transaction params: {e}")
             # Ultimate fallback - use simple gas price
             gas_price = self.get_optimal_gas_price()
-            base_params['gasPrice'] = gas_price
-            return base_params
+            tx_params['gasPrice'] = gas_price
+            return tx_params
             
     def _get_fallback_gas_limit(self) -> int:
         """Get fallback gas limit based on recent blocks"""

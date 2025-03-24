@@ -12,6 +12,7 @@ import argparse
 from utils.gas_manager import GasManager
 from web3.middleware import geth_poa_middleware
 from utils.web3_utils import get_web3_connection
+from utils.transfer_utils import transfer_max_native
 
 # Configure logging
 logging.basicConfig(
@@ -280,7 +281,7 @@ class VolumeMaker:
             return False
 
     def transfer_funds(self, from_index, to_index):
-        """Transfer 100% of funds from one wallet to another, only keeping exact gas needed."""
+        """Transfer maximum funds from one wallet to another with minimal buffer strategy."""
         try:
             if from_index >= len(self.wallets) or to_index >= len(self.wallets):
                 logger.error(f"Invalid wallet indices: {from_index}, {to_index}")
@@ -291,78 +292,9 @@ class VolumeMaker:
             
             logger.info(f"Transferring funds from {from_wallet['address']} to {to_wallet['address']}")
             
-            # Check if sender has funds
-            balance, balance_in_eth = self._check_wallet_balance(from_wallet['address'])
+            # Use the shared implementation
+            return transfer_max_native(self, from_wallet, to_wallet['address'])
             
-            if balance <= 0:
-                logger.warning(f"Sender wallet {from_wallet['address']} has no funds")
-                return False
-
-            # Build base transaction for gas estimation
-            base_tx = {
-                "from": from_wallet['address'],
-                "to": to_wallet['address'],
-                "chainId": self.config.CHAIN_ID,
-                "nonce": self.w3.eth.get_transaction_count(from_wallet['address'])
-            }
-
-            # Use gas manager to prepare transaction params and get gas price
-            tx_params = self.gas_manager.prepare_transaction_params(base_tx)
-            gas_limit = self.gas_manager.estimate_gas_limit(tx_params)
-            gas_price = tx_params.get('gasPrice', tx_params.get('maxFeePerGas', 0))
-
-            # Calculate exact gas cost
-            gas_cost = gas_limit * gas_price
-            logger.info(f"Exact gas cost: {self.w3.from_wei(gas_cost, 'ether')} {self.config.NATIVE_TOKEN}")
-
-            # Calculate maximum transferable amount (100% minus exact gas)
-            transfer_amount = balance - gas_cost
-            
-            if transfer_amount <= 0:
-                logger.warning(f"Insufficient balance to cover gas costs")
-                return False
-
-            logger.info(f"Transferring: {self.w3.from_wei(transfer_amount, 'ether')} {self.config.NATIVE_TOKEN}")
-            logger.info(f"Keeping for gas: {self.w3.from_wei(gas_cost, 'ether')} {self.config.NATIVE_TOKEN}")
-
-            # Build final transaction
-            transaction = {
-                **tx_params,
-                "from": from_wallet['address'],
-                "to": to_wallet['address'],
-                "value": transfer_amount,
-                "gas": gas_limit,
-                "nonce": base_tx['nonce']
-            }
-            
-            # Sign and send transaction
-            signed_txn = self.w3.eth.account.sign_transaction(transaction, from_wallet['private_key'])
-            
-            try:
-                tx_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
-                logger.info(f"Transfer transaction sent: {tx_hash.hex()}")
-                
-                # Wait for receipt
-                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-                if receipt['status'] == 1:
-                    logger.info(f"Transfer successful")
-                    
-                    # Verify the receiving wallet's balance
-                    time.sleep(2)
-                    _, to_balance = self._check_wallet_balance(to_wallet['address'])
-                    logger.info(f"Receiving wallet balance: {to_balance} {self.config.NATIVE_TOKEN}")
-                    
-                    return True
-                else:
-                    logger.error(f"Transfer failed with status: {receipt['status']}")
-                    return False
-                
-            except Exception as e:
-                logger.error(f"Error in transfer: {e}")
-                if "429" in str(e) and self._switch_rpc():
-                    return self.transfer_funds(from_index, to_index)
-                return False
-
         except Exception as e:
             logger.error(f"Error in transfer_funds: {e}")
             return False

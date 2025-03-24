@@ -12,6 +12,7 @@ from web3.middleware import geth_poa_middleware
 import sys
 from utils.gas_manager import GasManager
 from utils.web3_utils import get_web3_connection
+from utils.transfer_utils import transfer_max_native
 
 # Configure logging
 logging.basicConfig(
@@ -430,127 +431,12 @@ class WalletRecovery:
             return False
 
     def transfer_native(self, from_wallet, to_address):
-        """
-        Transfer all native tokens from a wallet with adaptive safety margin
-        
-        First attempts maximum transfer, then falls back to safety margin only if needed
-        """
+        """Transfer all native tokens from a wallet with minimal buffer strategy."""
         try:
-            from_address = self.w3.to_checksum_address(from_wallet['address'])
-            to_address = self.w3.to_checksum_address(to_address)
-            
-            # Check native balance
-            balance, balance_in_eth = self.check_native_balance(from_address)
-            
-            if balance <= self.w3.to_wei(0.00001, 'ether'):
-                logger.info(f"Insufficient native balance to transfer from {from_address}")
-                return False
-                
-            # Calculate gas estimate for a simple transfer
-            try:
-                gas_estimate = self.w3.eth.estimate_gas({
-                    "from": from_address,
-                    "to": to_address,
-                    "value": balance // 2  # Use half the balance for estimation to ensure it works
-                })
-                logger.info(f"Gas estimate for native transfer: {gas_estimate}")
-            except Exception as e:
-                logger.error(f"Error estimating gas: {e}")
-                gas_estimate = 21000  # Default gas limit for simple transfers
-            
-            # Get current gas price
-            try:
-                gas_price = self.w3.eth.gas_price
-                logger.info(f"Gas price for native transfer: {self.w3.from_wei(gas_price, 'gwei')} Gwei")
-            except Exception as e:
-                logger.error(f"Error getting gas price: {e}")
-                gas_price = self.w3.to_wei(50, 'gwei')  # Default fallback
-            
-            # Calculate gas cost
-            gas_cost = gas_estimate * gas_price
-            logger.info(f"Estimated gas cost: {self.w3.from_wei(gas_cost, 'ether')} {self.chain_config['native_token']}")
-            
-            # First attempt: Maximum amount with no safety margin
-            for attempt in range(2):  # At most 2 attempts - one without margin, one with
-                # Get fresh nonce for each attempt
-                nonce = self.w3.eth.get_transaction_count(from_address)
-                
-                # If this is the second attempt, apply safety margin
-                if attempt == 0:
-                    # First attempt: Maximum amount (no safety margin)
-                    amount = balance - gas_cost
-                    logger.info(f"Attempt 1: Sending maximum amount with no safety margin")
-                else:
-                    # Second attempt: Apply safety margin
-                    amount = balance - gas_cost
-                    amount = int(amount * 0.99)  # 1% safety margin
-                    logger.info(f"Attempt 2: Sending with 1% safety margin due to previous failure")
-                
-                if amount <= 0:
-                    logger.warning(f"Amount after gas deduction is zero or negative for wallet {from_address}")
-                    return False
-                    
-                # Calculate transfer amount
-                transfer_amount = amount
-                logger.info(f"Transfer amount: {self.w3.from_wei(transfer_amount, 'ether')} {self.chain_config['native_token']}")
-                
-                # Build transaction
-                transaction = {
-                    "from": from_address,
-                    "to": to_address,
-                    "value": transfer_amount,
-                    "gas": gas_estimate,
-                    "gasPrice": gas_price,
-                    "nonce": nonce,
-                    "chainId": self.chain_config['chain_id']
-                }
-                
-                # Sign and send transaction
-                try:
-                    signed_txn = self.w3.eth.account.sign_transaction(transaction, from_wallet['private_key'])
-                    tx_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
-                    logger.info(f"Native transfer transaction sent: {tx_hash.hex()}")
-                    
-                    # Wait for receipt
-                    receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-                    if receipt['status'] == 1:
-                        logger.info(f"Native transfer successful: {self.w3.from_wei(transfer_amount, 'ether')} {self.chain_config['native_token']}")
-                        return True
-                    else:
-                        logger.error(f"Native transfer failed with status: {receipt['status']}")
-                        if attempt == 0:
-                            logger.info("Retrying with safety margin...")
-                            continue
-                        return False
-                except Exception as e:
-                    error_str = str(e)
-                    logger.error(f"Error in native transfer: {error_str}")
-                    
-                    # Check if error is related to gas price or insufficient funds
-                    gas_related_errors = [
-                        "insufficient funds",
-                        "gas required exceeds allowance",
-                        "intrinsic gas too low",
-                        "replacement transaction underpriced",
-                        "gas price too low"
-                    ]
-                    
-                    if attempt == 0 and any(err in error_str.lower() for err in gas_related_errors):
-                        logger.info("Gas-related error detected. Retrying with safety margin...")
-                        continue
-                    
-                    # For other errors, or if we've already retried, try switching RPC
-                    if "429" in error_str and self._switch_rpc():
-                        return self.transfer_native(from_wallet, to_address)
-                    return False
-            
-            return False  # Both attempts failed
-                
+            # Use the shared implementation
+            return transfer_max_native(self, from_wallet, to_address)
         except Exception as e:
-            logger.error(f"Error transferring native tokens: {e}")
-            # Try switching RPC for certain errors
-            if "429" in str(e) and self._switch_rpc():
-                return self.transfer_native(from_wallet, to_address)
+            logger.error(f"Error in transfer_native: {e}")
             return False
 
     def transfer_dawae_tokens(self, from_wallet, to_address):

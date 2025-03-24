@@ -1321,8 +1321,8 @@
                 }
             },
             "transaction": {
-                "buy_amount": 1e-10,
-                "transfer_percentage": 0.998,
+                "buy_amount": 0.001,
+                "transfer_percentage": 1,
                 "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
@@ -1354,7 +1354,7 @@
             },
             "transaction": {
                 "buy_amount": 1e-12,
-                "transfer_percentage": 0.998,
+                "transfer_percentage": 1,
                 "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
@@ -2350,9 +2350,9 @@
                 ]
             },
             "transaction": {
-                "buy_amount": 1e-12,
-                "transfer_percentage": 0.998,
-                "gas_multiplier": 1.1,
+                "buy_amount": 0.00001,
+                "transfer_percentage": 1,
+                "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
                 "backoff_factor": 2
