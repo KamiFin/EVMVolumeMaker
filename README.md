@@ -124,21 +124,41 @@ python sniper.py sonic n
 
 ### Wallet Recovery
 
-Recover funds to a specific address:
+Recover native tokens to a specific address:
 
 ```bash
 python recovery.py sonic -d 0xYOUR_DESTINATION_ADDRESS
 ```
 
-Or use the default destination (first wallet in config):
+Recover both native and token balances:
+
+```bash
+python recovery.py sonic -d 0xYOUR_DESTINATION_ADDRESS --with-tokens
+```
+
+Or use the short form:
+```bash
+python recovery.py sonic -d 0xYOUR_DESTINATION_ADDRESS -t
+```
+
+Use the default destination (first wallet in config):
 
 ```bash
 python recovery.py sonic
 ```
 
-By default, the first wallet in your config is preserved and excluded from recovery. To include it:
+By default:
+- Only native tokens are recovered (more gas efficient)
+- The first wallet in your config is preserved and excluded from recovery
+- Funds are sent to the first wallet if no destination is specified
+
+Additional options:
 ```bash
+# Include first wallet in recovery (not recommended):
 python recovery.py sonic --include-first
+
+# Recover everything to a specific address:
+python recovery.py sonic -d 0xADDRESS --with-tokens
 ```
 
 ## Chain-Specific Considerations
@@ -152,6 +172,14 @@ The tools automatically adapt to different chains:
 Some tokens require special handling due to their transfer mechanisms:
 - DAWAE Token: Uses 200,000 gas limit on BSC (instead of standard 100,000)
 - Tokens with Transfer Fees: Scripts automatically handle tokens with transfer taxes/fees
+
+## Gas Efficiency
+- Default mode recovers only native tokens to minimize gas costs
+- Use --with-tokens flag when you need to recover both native and token balances
+- The script optimizes gas usage by:
+  - Prioritizing wallets with sufficient gas
+  - Batching operations efficiently
+  - Using chain-specific gas strategies
 
 ## Script Descriptions
 

@@ -280,12 +280,12 @@ class VolumeMaker:
             return False
 
     def transfer_funds(self, from_index, to_index):
-        """Transfer funds from one wallet to another."""
+        """Transfer 100% of funds from one wallet to another, only keeping exact gas needed."""
         try:
             if from_index >= len(self.wallets) or to_index >= len(self.wallets):
                 logger.error(f"Invalid wallet indices: {from_index}, {to_index}")
                 return False
-                
+            
             from_wallet = self.wallets[from_index]
             to_wallet = self.wallets[to_index]
             
@@ -297,113 +297,74 @@ class VolumeMaker:
             if balance <= 0:
                 logger.warning(f"Sender wallet {from_wallet['address']} has no funds")
                 return False
-                
-            # Calculate gas estimate
-            try:
-                gas_estimate = self.w3.eth.estimate_gas({
-                    "from": from_wallet['address'],
-                    "to": to_wallet['address'],
-                    "value": balance // 2  # Use half the balance for estimation to ensure it works
-                })
-                logger.info(f"Gas estimate for transfer: {gas_estimate}")
-            except Exception as e:
-                logger.error(f"Error estimating gas: {e}")
-                # Try switching RPC
-                if self._switch_rpc():
-                    return self.transfer_funds(from_index, to_index)
-                gas_estimate = 21000  # Default gas limit for simple transfers
+
+            # Build base transaction for gas estimation
+            base_tx = {
+                "from": from_wallet['address'],
+                "to": to_wallet['address'],
+                "chainId": self.config.CHAIN_ID,
+                "nonce": self.w3.eth.get_transaction_count(from_wallet['address'])
+            }
+
+            # Use gas manager to prepare transaction params and get gas price
+            tx_params = self.gas_manager.prepare_transaction_params(base_tx)
+            gas_limit = self.gas_manager.estimate_gas_limit(tx_params)
+            gas_price = tx_params.get('gasPrice', tx_params.get('maxFeePerGas', 0))
+
+            # Calculate exact gas cost
+            gas_cost = gas_limit * gas_price
+            logger.info(f"Exact gas cost: {self.w3.from_wei(gas_cost, 'ether')} {self.config.NATIVE_TOKEN}")
+
+            # Calculate maximum transferable amount (100% minus exact gas)
+            transfer_amount = balance - gas_cost
             
-            # Get current gas price
-            try:
-                gas_price = self.w3.eth.gas_price
-                adjusted_gas_price = gas_price
-                logger.info(f"Gas price for transfer: {self.w3.from_wei(adjusted_gas_price, 'gwei')} Gwei")
-            except Exception as e:
-                logger.error(f"Error getting gas price: {e}")
-                # Try switching RPC
-                if self._switch_rpc():
-                    return self.transfer_funds(from_index, to_index)
-                adjusted_gas_price = self.w3.to_wei(50, 'gwei')  # Default fallback
-            
-            # Calculate gas cost
-            gas_cost = gas_estimate * adjusted_gas_price
-            logger.info(f"Estimated gas cost: {self.w3.from_wei(gas_cost, 'ether')} {self.config.NATIVE_TOKEN}")
-            
-            # Calculate amount to send after deducting gas fee
-            amount = balance - gas_cost
-            
-            if amount <= 0:
-                logger.warning(f"Amount after gas deduction is zero or negative for wallet {from_wallet['address']}")
+            if transfer_amount <= 0:
+                logger.warning(f"Insufficient balance to cover gas costs")
                 return False
-                
-            # Apply transfer percentage
-            transfer_amount = int(amount * self.config.TRANSFER_PERCENTAGE)
-            logger.info(f"Transfer amount after applying percentage: {self.w3.from_wei(transfer_amount, 'ether')} {self.config.NATIVE_TOKEN}")
-            
-            # Get nonce
-            try:
-                nonce = self.w3.eth.get_transaction_count(from_wallet['address'])
-                logger.info(f"Using nonce: {nonce}")
-            except Exception as e:
-                logger.error(f"Error getting nonce: {e}")
-                # Try switching RPC
-                if self._switch_rpc():
-                    return self.transfer_funds(from_index, to_index)
-                return False
-            
+
+            logger.info(f"Transferring: {self.w3.from_wei(transfer_amount, 'ether')} {self.config.NATIVE_TOKEN}")
+            logger.info(f"Keeping for gas: {self.w3.from_wei(gas_cost, 'ether')} {self.config.NATIVE_TOKEN}")
+
+            # Build final transaction
             transaction = {
+                **tx_params,
                 "from": from_wallet['address'],
                 "to": to_wallet['address'],
                 "value": transfer_amount,
-                "gas": gas_estimate,
-                "gasPrice": adjusted_gas_price,
-                "nonce": nonce,
-                "chainId": self.config.CHAIN_ID
+                "gas": gas_limit,
+                "nonce": base_tx['nonce']
             }
             
+            # Sign and send transaction
             signed_txn = self.w3.eth.account.sign_transaction(transaction, from_wallet['private_key'])
             
             try:
                 tx_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
                 logger.info(f"Transfer transaction sent: {tx_hash.hex()}")
+                
+                # Wait for receipt
+                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                if receipt['status'] == 1:
+                    logger.info(f"Transfer successful")
+                    
+                    # Verify the receiving wallet's balance
+                    time.sleep(2)
+                    _, to_balance = self._check_wallet_balance(to_wallet['address'])
+                    logger.info(f"Receiving wallet balance: {to_balance} {self.config.NATIVE_TOKEN}")
+                    
+                    return True
+                else:
+                    logger.error(f"Transfer failed with status: {receipt['status']}")
+                    return False
+                
             except Exception as e:
-                logger.error(f"Error sending transaction: {e}")
-                # Try switching RPC
-                if self._switch_rpc():
-                    # Need to re-sign with the new nonce
+                logger.error(f"Error in transfer: {e}")
+                if "429" in str(e) and self._switch_rpc():
                     return self.transfer_funds(from_index, to_index)
                 return False
-            
-            # Wait for transaction receipt with timeout and retry
-            for attempt in range(1, self.config.MAX_RETRIES + 1):
-                try:
-                    receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-                    if receipt['status'] == 1:
-                        logger.info(f"Transfer successful: {self.w3.from_wei(transfer_amount, 'ether')} {self.config.NATIVE_TOKEN}")
-                        
-                        # Verify the balance of the receiving wallet
-                        time.sleep(2)  # Wait a bit for the balance to update
-                        _, to_balance = self._check_wallet_balance(to_wallet['address'])
-                        logger.info(f"Receiving wallet balance after transfer: {to_balance} {self.config.NATIVE_TOKEN}")
-                        
-                        return True
-                    else:
-                        logger.error(f"Transfer failed with status: {receipt['status']}")
-                        return False
-                except Exception as e:
-                    logger.warning(f"Error waiting for receipt on attempt {attempt}: {e}")
-                    if "429" in str(e) and self._switch_rpc():
-                        continue
-                    if attempt < self.config.MAX_RETRIES:
-                        time.sleep(self.config.BACKOFF_FACTOR * attempt)
-                    else:
-                        logger.error(f"Failed to get transaction receipt after {self.config.MAX_RETRIES} attempts")
-                        return False
-            
-            return False
-                
+
         except Exception as e:
-            logger.error(f"Error transferring funds: {e}")
+            logger.error(f"Error in transfer_funds: {e}")
             return False
 
     def start_cycle(self):

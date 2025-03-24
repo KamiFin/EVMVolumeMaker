@@ -56,7 +56,7 @@ def retry_with_backoff(max_retries=5, backoff_factor=1.5):
     return decorator
 
 class WalletRecovery:
-    def __init__(self, chain_name, config_file='config.json', destination_address=None):
+    def __init__(self, chain_name, config_file='config.json', destination_address=None, recover_tokens=True):
         """
         Initialize the wallet recovery tool
         
@@ -64,6 +64,7 @@ class WalletRecovery:
             chain_name: Name of the chain to recover from (e.g., 'sonic', 'ethereum')
             config_file: Path to the config file containing wallets and settings
             destination_address: Address to send all recovered funds to
+            recover_tokens: Boolean flag to control whether to recover tokens or only native currency
         """
         self.chain_name = chain_name
         self.config_file = config_file
@@ -108,6 +109,8 @@ class WalletRecovery:
 
         # Initialize gas manager
         self.gas_manager = GasManager(self.w3, self.chain_config['chain_id'])
+
+        self.recover_tokens = recover_tokens  # Add new parameter
 
     def load_config(self):
         """Load configuration from the config file"""
@@ -677,6 +680,21 @@ class WalletRecovery:
                 if native_balance >= min_valuable_native:
                     wallets_with_significant_native.append(wallet)
         
+        # Skip token-related operations if recover_tokens is False
+        if not self.recover_tokens:
+            logger.info("Token recovery disabled - recovering only native currency")
+            # Process wallets with native tokens only
+            for wallet in wallets_to_process:
+                native_balance, native_formatted = self.check_native_balance(wallet['address'])
+                if native_balance > self.w3.to_wei(0.00001, 'ether'):
+                    success = self.transfer_native(wallet, self.destination_address)
+                    if success:
+                        logger.info(f"Successfully transferred native tokens from {wallet['address']}")
+                    else:
+                        logger.warning(f"Failed to transfer native tokens from {wallet['address']}")
+                    time.sleep(2)
+            return
+        
         # Process wallets with tokens and sufficient gas
         logger.info(f"=== PHASE 1: Processing {len(wallets_with_tokens_and_gas)} wallets with tokens and sufficient gas ===")
         for wallet in wallets_with_tokens_and_gas:
@@ -874,6 +892,9 @@ if __name__ == "__main__":
         parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum)')
         parser.add_argument('--destination', '-d', help='Destination address for recovered funds')
         parser.add_argument('--include-first', action='store_true', help='Include first wallet in recovery (not recommended)')
+        # Change argument to enable token recovery instead of native-only
+        parser.add_argument('--with-tokens', '-t', action='store_true', 
+                          help='Recover both native and token balances (default: native only)')
         args = parser.parse_args()
 
         # By default, we'll send to the first wallet if destination not specified
@@ -881,7 +902,8 @@ if __name__ == "__main__":
         
         recovery = WalletRecovery(
             chain_name=args.chain,
-            destination_address=destination_address
+            destination_address=destination_address,
+            recover_tokens=args.with_tokens  # Now directly use with_tokens flag
         )
         
         # Display warning if first wallet will be processed
