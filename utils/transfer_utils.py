@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 def transfer_max_native(wallet_manager, from_wallet, to_address):
     """
     Transfer maximum native tokens with minimal buffer strategy.
-    Shared implementation used by both maker.py and recovery.py.
+    Added special handling for Sonic and BSC chains with RPC switching and buffer fallbacks.
     
     Args:
         wallet_manager: Instance of VolumeMaker or WalletRecovery class
@@ -242,6 +242,61 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                     # If it's not a gas-related error, don't retry
                     logger.error(f"Error not related to gas estimation: {error_msg}")
                     return False
+
+        # If we reach here, all normal attempts failed for Sonic/BSC
+        if chain_id in [146, 56]:  # Sonic Chain and BSC
+            logger.info("All standard attempts failed. Trying fallback strategy for Sonic/BSC...")
+            
+            # First try switching RPC if available
+            if hasattr(wallet_manager, '_switch_rpc') and wallet_manager._switch_rpc():
+                logger.info("Switched RPC endpoint. Retrying transfer...")
+                return transfer_max_native(wallet_manager, from_wallet, to_address)
+            
+            # If RPC switch didn't work or wasn't available, try with small buffers
+            small_buffers = [0.001, 0.002, 0.005, 0.01]  # 0.1% to 1% buffers
+            
+            for buffer_percentage in small_buffers:
+                logger.info(f"Trying with {buffer_percentage*100}% buffer for Sonic/BSC...")
+                
+                # Calculate new gas cost with small buffer
+                gas_cost_with_buffer = int(gas_cost * (1 + buffer_percentage))
+                transfer_amount = balance - gas_cost_with_buffer
+                
+                if transfer_amount <= 0:
+                    continue
+                
+                # Get fresh nonce
+                current_nonce = w3.eth.get_transaction_count(from_address)
+                
+                # Build transaction
+                tx_params = {
+                    "from": from_address,
+                    "to": to_address,
+                    "value": transfer_amount,
+                    "gas": gas_estimate,
+                    "gasPrice": gas_price,
+                    "nonce": current_nonce,
+                    "chainId": chain_id
+                }
+                
+                try:
+                    signed_txn = w3.eth.account.sign_transaction(tx_params, from_wallet['private_key'])
+                    tx_hash = w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                    
+                    logger.info(f"Fallback transfer attempt sent: {tx_hash.hex()}")
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+                    
+                    if receipt['status'] == 1:
+                        logger.info(f"Transfer successful with {buffer_percentage*100}% fallback buffer")
+                        return True
+                        
+                except Exception as e:
+                    logger.warning(f"Fallback attempt failed with {buffer_percentage*100}% buffer: {str(e)}")
+                    time.sleep(2)
+                    continue
+            
+            logger.error("All fallback attempts failed for Sonic/BSC")
+            return False
 
         return False  # All attempts failed
         

@@ -13,6 +13,8 @@ from utils.gas_manager import GasManager
 from web3.middleware import geth_poa_middleware
 from utils.web3_utils import get_web3_connection
 from utils.transfer_utils import transfer_max_native
+import signal
+import sys
 
 # Configure logging
 logging.basicConfig(
@@ -109,6 +111,10 @@ class VolumeMaker:
             self._initialize()
         
         self.gas_manager = GasManager(self.w3, self.config.CHAIN_ID)
+        
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, lambda s, f: self._signal_handler(s, f))
+        signal.signal(signal.SIGTERM, lambda s, f: self._signal_handler(s, f))
 
     def _get_web3_connection(self):
         """Get a Web3 connection, trying alternative RPCs if needed."""
@@ -166,22 +172,41 @@ class VolumeMaker:
             logger.info("No config file found, will create new wallets")
 
     def _save_wallets(self):
-        """Save wallets to config file."""
-        try:
-            # Load existing config to preserve other settings
-            with open(self.config.CONFIG_FILE, 'r') as f:
-                config_data = json.load(f)
-            
-            # Update wallets
-            config_data["wallets"] = self.wallets
-            
-            # Write back to file
-            with open(self.config.CONFIG_FILE, 'w') as f:
-                json.dump(config_data, f, indent=4)
+        """Save wallets to config file with improved error handling."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Create a backup of the existing config first
+                if os.path.exists(self.config.CONFIG_FILE):
+                    backup_file = f"{self.config.CONFIG_FILE}.backup"
+                    with open(self.config.CONFIG_FILE, 'r') as src:
+                        with open(backup_file, 'w') as dst:
+                            dst.write(src.read())
                 
-            logger.info(f"Saved {len(self.wallets)} wallets to config file")
-        except Exception as e:
-            logger.error(f"Error saving wallets to config: {e}")
+                # Load existing config to preserve other settings
+                with open(self.config.CONFIG_FILE, 'r') as f:
+                    config_data = json.load(f)
+                
+                # Update wallets
+                config_data["wallets"] = self.wallets
+                
+                # Write to temporary file first
+                temp_file = f"{self.config.CONFIG_FILE}.tmp"
+                with open(temp_file, 'w') as f:
+                    json.dump(config_data, f, indent=4)
+                
+                # Rename temporary file to actual config file
+                os.replace(temp_file, self.config.CONFIG_FILE)
+                
+                logger.info(f"Successfully saved {len(self.wallets)} wallets to config file")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error saving wallets to config (attempt {attempt + 1}/{max_retries}): {e}")
+                time.sleep(1)
+        
+        logger.critical("Failed to save wallets after multiple attempts!")
+        return False
 
     def _initialize(self):
         """Create the first wallet to start the process."""
@@ -196,7 +221,7 @@ class VolumeMaker:
             "private_key": acct._private_key.hex()
         }
         self.wallets.append(wallet)
-        self._save_wallets()
+        self._save_wallets()  # Saves to config.json immediately after creation
         logger.info(f"Generated new wallet: {wallet['address']}")
         return wallet
 
@@ -292,9 +317,20 @@ class VolumeMaker:
             
             logger.info(f"Transferring funds from {from_wallet['address']} to {to_wallet['address']}")
             
-            # Use the shared implementation
-            return transfer_max_native(self, from_wallet, to_wallet['address'])
-            
+            # Use the shared implementation with retries
+            max_transfer_retries = 3
+            for attempt in range(max_transfer_retries):
+                transfer_success = transfer_max_native(self, from_wallet, to_wallet['address'])
+                if transfer_success:
+                    return True
+                    
+                if attempt < max_transfer_retries - 1:
+                    logger.warning(f"Transfer attempt {attempt + 1} failed, retrying in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    logger.error("All transfer attempts failed. Stopping wallet cycle.")
+                    return False
+                
         except Exception as e:
             logger.error(f"Error in transfer_funds: {e}")
             return False
@@ -340,9 +376,12 @@ class VolumeMaker:
             time.sleep(wait_time)
             
             # 4. Transfer funds to the new wallet
-            transfer_success = self.transfer_funds(self.index, self.index + 1)
+            transfer_success = self.transfer_funds(self.index, len(self.wallets) - 1)
             if not transfer_success:
-                logger.warning("Transfer operation failed, but continuing to next cycle")
+                logger.error("Transfer failed - removing newly created wallet")
+                # Remove the newly created wallet since transfer failed
+                self.wallets.pop()
+                self._save_wallets()  # Saves the updated list after removing failed wallet
                 return False
             
             # 5. Move to the next wallet
@@ -356,30 +395,46 @@ class VolumeMaker:
             return False
 
     def run(self):
-        """Run the volume maker continuously."""
-        logger.info("Starting volume maker process")
-        
-        cycle_count = 0
-        while True:
-            try:
-                cycle_count += 1
-                logger.info(f"Starting cycle {cycle_count}")
+        """Main volume making cycle with improved error handling and wallet creation"""
+        try:
+            current_wallet_index = 0
+            last_save_time = time.time()
+            save_interval = 300  # Save every 5 minutes
+            
+            while True:
+                # Periodic save of wallets
+                if time.time() - last_save_time > save_interval:
+                    self._save_wallets()
+                    last_save_time = time.time()
                 
-                success = self.start_cycle()
-                if not success:
-                    wait_time = min(30, self.config.WAIT_TIME * 2)
-                    logger.warning(f"Cycle {cycle_count} had issues, waiting {wait_time} seconds before next attempt")
-                    time.sleep(wait_time)
-                else:
-                    # Wait between successful cycles
-                    time.sleep(self.config.WAIT_TIME)
+                # Start the cycle
+                cycle_success = self.start_cycle()
+                if not cycle_success:
+                    logger.error("Cycle failed - stopping volume maker")
+                    self._save_wallets()
+                    break
                 
-            except KeyboardInterrupt:
-                logger.info("Process interrupted by user")
-                break
-            except Exception as e:
-                logger.error(f"Unexpected error in cycle {cycle_count}: {e}")
-                time.sleep(30)  # Wait longer after an error
+                # Wait between cycles with periodic saves
+                wait_time = self.config.WAIT_TIME
+                wait_start = time.time()
+                while time.time() - wait_start < wait_time:
+                    if time.time() - last_save_time > save_interval:
+                        self._save_wallets()
+                        last_save_time = time.time()
+                    time.sleep(min(1, wait_time - (time.time() - wait_start)))
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in volume maker cycle: {e}")
+            self._save_wallets()  # Save wallets before exiting on error
+            return False
+
+    def _signal_handler(self, signum, frame):
+        """Handle program interruption by saving wallets before exit."""
+        logger.info("Received interrupt signal. Saving wallets before exit...")
+        self._save_wallets()
+        sys.exit(0)
 
 
 if __name__ == "__main__":
