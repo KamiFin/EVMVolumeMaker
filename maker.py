@@ -115,6 +115,8 @@ class VolumeMaker:
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, lambda s, f: self._signal_handler(s, f))
         signal.signal(signal.SIGTERM, lambda s, f: self._signal_handler(s, f))
+        
+        self.failed_wallets = set()  # Track failed wallets
 
     def _get_web3_connection(self):
         """Get a Web3 connection, trying alternative RPCs if needed."""
@@ -145,18 +147,48 @@ class VolumeMaker:
         raise ConnectionError("Failed to connect to any RPC endpoint")
 
     def _switch_rpc(self):
-        """Switch to the next RPC endpoint."""
-        self.current_rpc_index += 1
-        logger.info(f"Switching to next RPC endpoint")
-        self.w3 = self._get_web3_connection()
-        
-        # Also update the RPC in sniper.py
-        all_rpcs = [self.config.RPC_URL] + self.config.ALTERNATIVE_RPCS
-        rpc_url = all_rpcs[self.current_rpc_index % len(all_rpcs)]
-        sniper.web3 = Web3(Web3.HTTPProvider(rpc_url))
-        sniper.rpc = rpc_url
-        
-        return self.w3.is_connected()
+        """Switch to the next RPC endpoint with improved error handling."""
+        try:
+            original_rpc_index = self.current_rpc_index
+            max_attempts = len(self.config.ALTERNATIVE_RPCS) + 1
+            
+            for _ in range(max_attempts):
+                self.current_rpc_index = (self.current_rpc_index + 1) % max_attempts
+                
+                # Skip if we've tried all RPCs and are back to the original
+                if self.current_rpc_index == original_rpc_index:
+                    logger.error("Tried all available RPCs without success")
+                    return False
+                    
+                try:
+                    all_rpcs = [self.config.RPC_URL] + self.config.ALTERNATIVE_RPCS
+                    rpc_url = all_rpcs[self.current_rpc_index]
+                    
+                    logger.info(f"Attempting to switch to RPC: {rpc_url}")
+                    
+                    # Test connection before switching
+                    new_w3 = Web3(Web3.HTTPProvider(rpc_url))
+                    new_w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+                    
+                    if new_w3.is_connected():
+                        self.w3 = new_w3
+                        
+                        # Update sniper's web3 instance
+                        sniper.web3 = new_w3
+                        sniper.rpc = rpc_url
+                        
+                        logger.info(f"Successfully switched to RPC: {rpc_url}")
+                        return True
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to connect to RPC {rpc_url}: {e}")
+                    continue
+                    
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error in RPC switching: {e}")
+            return False
 
     def _load_wallets(self):
         """Load wallets from config file if it exists."""
@@ -221,7 +253,7 @@ class VolumeMaker:
             "private_key": acct._private_key.hex()
         }
         self.wallets.append(wallet)
-        self._save_wallets()  # Saves to config.json immediately after creation
+        self._save_wallets()  # First save here
         logger.info(f"Generated new wallet: {wallet['address']}")
         return wallet
 
@@ -306,7 +338,7 @@ class VolumeMaker:
             return False
 
     def transfer_funds(self, from_index, to_index):
-        """Transfer maximum funds from one wallet to another with minimal buffer strategy."""
+        """Transfer maximum funds from one wallet to another with robust error handling and RPC switching."""
         try:
             if from_index >= len(self.wallets) or to_index >= len(self.wallets):
                 logger.error(f"Invalid wallet indices: {from_index}, {to_index}")
@@ -315,28 +347,86 @@ class VolumeMaker:
             from_wallet = self.wallets[from_index]
             to_wallet = self.wallets[to_index]
             
+            # Store initial balances
+            initial_from_balance = self._check_wallet_balance(from_wallet['address'])[0]
+            initial_to_balance = self._check_wallet_balance(to_wallet['address'])[0]
+            
             logger.info(f"Transferring funds from {from_wallet['address']} to {to_wallet['address']}")
             
-            # Use the shared implementation with retries
+            # Track last transaction hash
+            last_tx_hash = None
             max_transfer_retries = 3
+            
             for attempt in range(max_transfer_retries):
-                transfer_success = transfer_max_native(self, from_wallet, to_wallet['address'])
-                if transfer_success:
-                    return True
+                try:
+                    # Important: Check if funds already moved
+                    current_from_balance = self._check_wallet_balance(from_wallet['address'])[0]
+                    current_to_balance = self._check_wallet_balance(to_wallet['address'])[0]
                     
-                if attempt < max_transfer_retries - 1:
-                    logger.warning(f"Transfer attempt {attempt + 1} failed, retrying in 5 seconds...")
-                    time.sleep(5)
-                else:
-                    logger.error("All transfer attempts failed. Stopping wallet cycle.")
-                    return False
-                
+                    # If balance moved from source to destination, consider it successful
+                    if (current_from_balance < initial_from_balance and 
+                        current_to_balance > initial_to_balance):
+                        logger.info("Transfer detected as successful through balance check")
+                        return True
+                    
+                    # If source has no balance but had before, check last tx
+                    if current_from_balance == 0 and initial_from_balance > 0:
+                        if last_tx_hash:
+                            try:
+                                receipt = self.w3.eth.get_transaction_receipt(last_tx_hash)
+                                if receipt and receipt['status'] == 1:
+                                    logger.info(f"Previous transaction {last_tx_hash} was successful")
+                                    return True
+                            except Exception as e:
+                                logger.warning(f"Error checking previous transaction: {e}")
+                                # Don't return False here - might need to check balances again
+
+                    # Attempt transfer with current RPC
+                    transfer_success, tx_hash = transfer_max_native(self, from_wallet, to_wallet['address'])
+                    last_tx_hash = tx_hash
+                    
+                    if transfer_success:
+                        return True
+                        
+                    # If transfer failed, try switching RPC
+                    if self._switch_rpc():
+                        logger.info("Switched to alternative RPC endpoint")
+                    else:
+                        logger.error("Failed to switch to alternative RPC")
+                        
+                except Exception as e:
+                    logger.error(f"Transfer attempt {attempt + 1} failed: {e}")
+                    
+                    # IMPORTANT: Check balances before giving up
+                    try:
+                        final_from_balance = self._check_wallet_balance(from_wallet['address'])[0]
+                        final_to_balance = self._check_wallet_balance(to_wallet['address'])[0]
+                        
+                        if (final_from_balance < initial_from_balance and 
+                            final_to_balance > initial_to_balance):
+                            logger.info("Transfer detected as successful through final balance check")
+                            return True
+                    except Exception as check_e:
+                        logger.error(f"Error in final balance check: {check_e}")
+                    
+                    # Try switching RPC on error
+                    if self._switch_rpc():
+                        logger.info("Switched to alternative RPC after error")
+                    
+                    if attempt < max_transfer_retries - 1:
+                        wait_time = 5 * (attempt + 1)  # Exponential backoff
+                        logger.warning(f"Waiting {wait_time} seconds before retry...")
+                        time.sleep(wait_time)
+                        
+            logger.error("All transfer attempts failed")
+            return False
+            
         except Exception as e:
-            logger.error(f"Error in transfer_funds: {e}")
+            logger.error(f"Critical error in transfer_funds: {e}")
             return False
 
     def start_cycle(self):
-        """Start a volume making cycle."""
+        """Start a volume making cycle with improved safety measures."""
         try:
             # Check if current wallet has funds
             current_wallet = self.wallets[self.index]
@@ -366,9 +456,9 @@ class VolumeMaker:
             if not buy_success:
                 logger.warning("Buy operation failed, continuing with next steps")
             
-            # 2. Generate a new wallet
+            # 2. Generate new wallet (wallet is already added to self.wallets inside _generate_wallet)
             new_wallet = self._generate_wallet()
-            logger.info(f"Generated new wallet for next cycle: {new_wallet['address']}")
+            logger.info("New wallet generated and saved to config")
             
             # 3. Wait for transactions to be mined
             wait_time = self.config.WAIT_TIME
@@ -378,10 +468,7 @@ class VolumeMaker:
             # 4. Transfer funds to the new wallet
             transfer_success = self.transfer_funds(self.index, len(self.wallets) - 1)
             if not transfer_success:
-                logger.error("Transfer failed - removing newly created wallet")
-                # Remove the newly created wallet since transfer failed
-                self.wallets.pop()
-                self._save_wallets()  # Saves the updated list after removing failed wallet
+                logger.error("Transfer failed - stopping cycle but keeping all wallets")
                 return False
             
             # 5. Move to the next wallet
@@ -392,16 +479,32 @@ class VolumeMaker:
             
         except Exception as e:
             logger.error(f"Error in volume making cycle: {e}")
+            # Don't remove any wallets, just stop the cycle
             return False
 
+    def mark_wallet_failed(self, wallet_address):
+        """Mark a wallet as failed without removing it."""
+        self.failed_wallets.add(wallet_address)
+        logger.warning(f"Marked wallet {wallet_address} as failed - will skip in future cycles")
+        
+    def is_wallet_failed(self, wallet_address):
+        """Check if a wallet is marked as failed."""
+        return wallet_address in self.failed_wallets
+
     def run(self):
-        """Main volume making cycle with improved error handling and wallet creation"""
+        """Main volume making cycle with improved error handling"""
         try:
-            current_wallet_index = 0
             last_save_time = time.time()
             save_interval = 300  # Save every 5 minutes
             
             while True:
+                # Skip failed wallets
+                current_wallet = self.wallets[self.index]
+                if self.is_wallet_failed(current_wallet['address']):
+                    logger.info(f"Skipping failed wallet {current_wallet['address']}")
+                    self._increment_index()
+                    continue
+                
                 # Periodic save of wallets
                 if time.time() - last_save_time > save_interval:
                     self._save_wallets()
@@ -410,24 +513,17 @@ class VolumeMaker:
                 # Start the cycle
                 cycle_success = self.start_cycle()
                 if not cycle_success:
-                    logger.error("Cycle failed - stopping volume maker")
-                    self._save_wallets()
-                    break
+                    # Mark current wallet as failed instead of removing it
+                    self.mark_wallet_failed(current_wallet['address'])
+                    logger.error("Cycle failed - marking wallet as failed and continuing")
+                    self._increment_index()
                 
-                # Wait between cycles with periodic saves
-                wait_time = self.config.WAIT_TIME
-                wait_start = time.time()
-                while time.time() - wait_start < wait_time:
-                    if time.time() - last_save_time > save_interval:
-                        self._save_wallets()
-                        last_save_time = time.time()
-                    time.sleep(min(1, wait_time - (time.time() - wait_start)))
-            
-            return True
+                # Wait between cycles
+                time.sleep(self.config.WAIT_TIME)
             
         except Exception as e:
             logger.error(f"Error in volume maker cycle: {e}")
-            self._save_wallets()  # Save wallets before exiting on error
+            self._save_wallets()
             return False
 
     def _signal_handler(self, signum, frame):
