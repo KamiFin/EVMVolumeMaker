@@ -38,7 +38,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
         
         if balance <= w3.to_wei(0.00001, 'ether'):
             logger.info(f"Insufficient native balance to transfer from {from_address}")
-            return False
+            return False, None
             
         # Calculate gas estimate for a simple transfer
         try:
@@ -111,7 +111,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
             
             if transfer_amount <= 0:
                 logger.warning(f"Insufficient balance to cover gas costs with {(buffer_multiplier-1)*100:.1f}% buffer")
-                return False
+                return False, None
 
             # Log attempt details
             if buffer_multiplier == 1.0:
@@ -172,7 +172,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                         _, to_balance = wallet_manager._check_wallet_balance(to_address)
                         logger.info(f"Receiving wallet balance: {to_balance} {native_token}")
                     
-                    return True
+                    return True, tx_hash
                 else:
                     logger.error(f"Transfer failed with status: {receipt['status']}")
                     # Continue to next buffer size if not the last attempt
@@ -180,7 +180,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                         logger.info(f"Trying with larger buffer...")
                         time.sleep(2)
                     else:
-                        return False
+                        return False, None
             
             except Exception as e:
                 error_msg = str(e)
@@ -223,7 +223,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                                 receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
                                 if receipt['status'] == 1:
                                     logger.info(f"Transfer successful with custom shortfall compensation")
-                                    return True
+                                    return True, tx_hash
                         except:
                             pass
                     
@@ -233,7 +233,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                         time.sleep(2)
                     else:
                         logger.error("All buffer sizes failed")
-                        return False
+                        return False, None
                 elif "429" in error_msg and hasattr(wallet_manager, '_switch_rpc') and wallet_manager._switch_rpc():
                     # RPC rate limit error, try with a different RPC
                     logger.info("Switching RPC endpoint due to rate limiting")
@@ -241,7 +241,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                 else:
                     # If it's not a gas-related error, don't retry
                     logger.error(f"Error not related to gas estimation: {error_msg}")
-                    return False
+                    return False, None
 
         # If we reach here, all normal attempts failed for Sonic/BSC
         if chain_id in [146, 56]:  # Sonic Chain and BSC
@@ -288,7 +288,7 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                     
                     if receipt['status'] == 1:
                         logger.info(f"Transfer successful with {buffer_percentage*100}% fallback buffer")
-                        return True
+                        return True, tx_hash
                         
                 except Exception as e:
                     logger.warning(f"Fallback attempt failed with {buffer_percentage*100}% buffer: {str(e)}")
@@ -296,10 +296,10 @@ def transfer_max_native(wallet_manager, from_wallet, to_address):
                     continue
             
             logger.error("All fallback attempts failed for Sonic/BSC")
-            return False
+            return False, None
 
-        return False  # All attempts failed
+        return False, None  # All attempts failed
         
     except Exception as e:
         logger.error(f"Error in transfer_max_native: {e}")
-        return False 
+        return False, None 

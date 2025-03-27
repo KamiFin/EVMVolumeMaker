@@ -532,24 +532,38 @@ class WalletRecovery:
         token_gas_cost = token_gas_limit * gas_price
         
         # Check initial balance of destination wallet
-        _, dest_native_balance = self.check_native_balance(self.destination_address)
-        logger.info(f"Initial destination wallet balance: {dest_native_balance} {self.chain_config['native_token']}")
+        dest_native_balance, dest_native_balance_formatted = self.check_native_balance(self.destination_address)
+        logger.info(f"Initial destination wallet balance: {dest_native_balance_formatted} {self.chain_config['native_token']}")
         
-        # Group wallets into categories
+        # Group wallets into categories WITH CACHED BALANCES to avoid redundant RPC calls
         wallets_with_tokens_and_gas = []
         wallets_with_tokens_no_gas = []
         wallets_with_only_native = []
-        wallets_with_significant_native = []  # Wallets with enough native tokens to be worth recovering first
+        wallets_with_significant_native = []
+        
+        # Store wallet balances to avoid rechecking
+        wallet_balances = {}  # Structure: {address: {'native': (balance, formatted), 'token': (balance, formatted)}}
+        
+        # Determine minimum valuable native balance (3x regular transfer gas cost)
+        min_valuable_native = 21000 * gas_price * 3
+        min_threshold = self.w3.to_wei(0.00001, 'ether')
         
         for wallet in wallets_to_process:
             address = wallet['address']
-            token_balance, _ = self.check_token_balance(address)
+            
+            # Check and store token balance if we need to recover tokens
+            if self.recover_tokens:
+                token_balance, token_formatted = self.check_token_balance(address)
+                wallet_balances[address] = {'token': (token_balance, token_formatted)}
+            else:
+                wallet_balances[address] = {'token': (0, 0)}
+            
+            # Check and store native balance
             native_balance, native_formatted = self.check_native_balance(address)
+            wallet_balances[address]['native'] = (native_balance, native_formatted)
             
-            # Determine minimum valuable native balance (3x regular transfer gas cost)
-            min_valuable_native = 21000 * gas_price * 3
-            
-            if token_balance > 0:
+            # Categorize wallets based on balances
+            if wallet_balances[address]['token'][0] > 0:
                 if native_balance >= token_gas_cost:
                     wallets_with_tokens_and_gas.append(wallet)
                 else:
@@ -559,7 +573,7 @@ class WalletRecovery:
                     if native_balance >= min_valuable_native:
                         wallets_with_significant_native.append(wallet)
                     
-            elif native_balance > self.w3.to_wei(0.00001, 'ether'):
+            elif native_balance > min_threshold:
                 wallets_with_only_native.append(wallet)
                 
                 # If the wallet has a significant native balance, prioritize it
@@ -571,8 +585,8 @@ class WalletRecovery:
             logger.info("Token recovery disabled - recovering only native currency")
             # Process wallets with native tokens only
             for wallet in wallets_to_process:
-                native_balance, native_formatted = self.check_native_balance(wallet['address'])
-                if native_balance > self.w3.to_wei(0.00001, 'ether'):
+                native_balance = wallet_balances[wallet['address']]['native'][0]
+                if native_balance > min_threshold:
                     success = self.transfer_native(wallet, self.destination_address)
                     if success:
                         logger.info(f"Successfully transferred native tokens from {wallet['address']}")
@@ -738,9 +752,9 @@ class WalletRecovery:
                 continue
             
             logger.info(f"Sweeping native tokens from {wallet['address']}")
-            native_balance, _ = self.check_native_balance(wallet['address'])
+            native_balance = wallet_balances[wallet['address']]['native'][0]
             
-            if native_balance > self.w3.to_wei(0.00001, 'ether'):
+            if native_balance > min_threshold:
                 success = self.transfer_native(wallet, self.destination_address)
                 if success:
                     logger.info(f"Successfully swept native tokens from {wallet['address']}")

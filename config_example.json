@@ -1326,7 +1326,8 @@
                 "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
-                "backoff_factor": 2
+                "backoff_factor": 2,
+                "min_balance_threshold": 0.00001
             }
         },
         "base": {
@@ -1358,7 +1359,8 @@
                 "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
-                "backoff_factor": 2
+                "backoff_factor": 2,
+                "min_balance_threshold": 0.00001
             }
         },
         "bsc": {
@@ -2355,7 +2357,8 @@
                 "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
-                "backoff_factor": 2
+                "backoff_factor": 2,
+                "min_balance_threshold": 0.00001
             },
             "token": {
                 "DAWAE": {

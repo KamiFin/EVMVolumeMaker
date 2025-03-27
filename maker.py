@@ -15,6 +15,7 @@ from utils.web3_utils import get_web3_connection
 from utils.transfer_utils import transfer_max_native
 import signal
 import sys
+from enum import Enum
 
 # Configure logging
 logging.basicConfig(
@@ -81,9 +82,14 @@ class Config:
         self.WAIT_TIME = chain_config['transaction']['wait_time']
         self.MAX_RETRIES = chain_config['transaction'].get('max_retries', 3)
         self.BACKOFF_FACTOR = chain_config['transaction'].get('backoff_factor', 2)
+        self.MIN_BALANCE_THRESHOLD = chain_config['transaction'].get('min_balance_threshold', 0.00001)
         
         # File paths
         self.CONFIG_FILE = 'config.json'
+
+class CycleResult(Enum):
+    CONTINUE = True   # Continue to next cycle
+    STOP = False     # Stop and mark wallet as failed
 
 class VolumeMaker:
     def __init__(self, chain_name):
@@ -294,6 +300,15 @@ class VolumeMaker:
                 return self._check_wallet_balance(address)
             return 0, 0
 
+    def _find_wallet_with_balance(self):
+        """Find a wallet with sufficient balance in the wallet list."""
+        for idx, wallet in enumerate(self.wallets):
+            balance, balance_eth = self._check_wallet_balance(wallet['address'])
+            if balance > self.w3.to_wei(self.config.MIN_BALANCE_THRESHOLD, 'ether'):
+                logger.info(f"Found wallet with sufficient balance: {wallet['address']} ({balance_eth} {self.config.NATIVE_TOKEN})")
+                return idx
+        return -1  # No wallet with sufficient balance found
+
     def buy_tokens(self):
         """Buy tokens using the current wallet."""
         try:
@@ -382,8 +397,15 @@ class VolumeMaker:
                                 # Don't return False here - might need to check balances again
 
                     # Attempt transfer with current RPC
-                    transfer_success, tx_hash = transfer_max_native(self, from_wallet, to_wallet['address'])
-                    last_tx_hash = tx_hash
+                    transfer_result = transfer_max_native(self, from_wallet, to_wallet['address'])
+                    
+                    # Fix: Handle both tuple and boolean return types
+                    if isinstance(transfer_result, tuple):
+                        transfer_success, tx_hash = transfer_result
+                        last_tx_hash = tx_hash
+                    else:
+                        # If just a boolean was returned
+                        transfer_success = transfer_result
                     
                     if transfer_success:
                         return True
@@ -432,14 +454,19 @@ class VolumeMaker:
             current_wallet = self.wallets[self.index]
             balance, balance_in_eth = self._check_wallet_balance(current_wallet['address'])
             
-            if balance <= self.w3.to_wei(0.0001, 'ether'):
+            if balance <= self.w3.to_wei(self.config.MIN_BALANCE_THRESHOLD, 'ether'):
                 logger.warning(f"Current wallet {current_wallet['address']} has insufficient funds: {balance_in_eth} {self.config.NATIVE_TOKEN}")
                 
-                # If this is not the first wallet, try to go back to the first wallet
-                if self.index > 0:
-                    logger.info("Attempting to return to the first wallet which should have funds")
-                    self.index = 0
-                    return False
+                # Try to find any wallet with sufficient balance
+                wallet_index = self._find_wallet_with_balance()
+                
+                if wallet_index >= 0:
+                    logger.info(f"Switching to wallet at index {wallet_index} which has sufficient funds")
+                    self.index = wallet_index
+                    return CycleResult.CONTINUE  # Continue with the found wallet
+                else:
+                    logger.error("No wallet with sufficient funds found. Stopping operations")
+                    return CycleResult.STOP  # Stop operations
             
             # Initialize sniper with current chain configuration
             logger.info("Initializing sniper module...")
@@ -449,14 +476,15 @@ class VolumeMaker:
             logger.info("Checking if token pair exists...")
             if not sniper.check_pair_exists(self.config.TOKEN_CONTRACT):
                 logger.error(f"Token pair does not exist on the DEX. Please create liquidity first.")
-                return False
+                return CycleResult.STOP  # Stop if pair doesn't exist
             
             # 1. Buy tokens with current wallet
             buy_success = self.buy_tokens()
             if not buy_success:
-                logger.warning("Buy operation failed, continuing with next steps")
+                logger.error("Buy operation failed")
+                return CycleResult.STOP  # Stop if buy fails
             
-            # 2. Generate new wallet (wallet is already added to self.wallets inside _generate_wallet)
+            # 2. Generate new wallet
             new_wallet = self._generate_wallet()
             logger.info("New wallet generated and saved to config")
             
@@ -468,19 +496,18 @@ class VolumeMaker:
             # 4. Transfer funds to the new wallet
             transfer_success = self.transfer_funds(self.index, len(self.wallets) - 1)
             if not transfer_success:
-                logger.error("Transfer failed - stopping cycle but keeping all wallets")
-                return False
+                logger.error("Transfer failed - stopping cycle")
+                return CycleResult.STOP  # Stop if transfer fails
             
             # 5. Move to the next wallet
             self._increment_index()
             
             logger.info(f"Completed cycle {self.index}. Moving to next wallet.")
-            return True
+            return CycleResult.CONTINUE
             
         except Exception as e:
             logger.error(f"Error in volume making cycle: {e}")
-            # Don't remove any wallets, just stop the cycle
-            return False
+            return CycleResult.STOP  # Stop on any unexpected error
 
     def mark_wallet_failed(self, wallet_address):
         """Mark a wallet as failed without removing it."""
@@ -498,31 +525,37 @@ class VolumeMaker:
             save_interval = 300  # Save every 5 minutes
             
             while True:
-                # Skip failed wallets
-                current_wallet = self.wallets[self.index]
-                if self.is_wallet_failed(current_wallet['address']):
-                    logger.info(f"Skipping failed wallet {current_wallet['address']}")
-                    self._increment_index()
-                    continue
-                
-                # Periodic save of wallets
-                if time.time() - last_save_time > save_interval:
+                try:
+                    # Skip failed wallets
+                    current_wallet = self.wallets[self.index]
+                    if self.is_wallet_failed(current_wallet['address']):
+                        logger.info(f"Skipping failed wallet {current_wallet['address']}")
+                        self._increment_index()
+                        continue
+                    
+                    # Periodic save of wallets
+                    if time.time() - last_save_time > save_interval:
+                        self._save_wallets()
+                        last_save_time = time.time()
+                    
+                    # Start the cycle
+                    cycle_result = self.start_cycle()
+                    if not cycle_result:  # If CycleResult.STOP (False)
+                        self.mark_wallet_failed(current_wallet['address'])
+                        logger.error("Cycle failed - marking wallet as failed and stopping operations")
+                        self._save_wallets()  # Save state after failure
+                        return False  # Exit the run method
+                    
+                    # Wait between cycles
+                    time.sleep(self.config.WAIT_TIME)
+                    
+                except Exception as cycle_error:
+                    logger.error(f"Error in cycle execution: {cycle_error}")
                     self._save_wallets()
-                    last_save_time = time.time()
-                
-                # Start the cycle
-                cycle_success = self.start_cycle()
-                if not cycle_success:
-                    # Mark current wallet as failed instead of removing it
-                    self.mark_wallet_failed(current_wallet['address'])
-                    logger.error("Cycle failed - marking wallet as failed and continuing")
-                    self._increment_index()
-                
-                # Wait between cycles
-                time.sleep(self.config.WAIT_TIME)
+                    return False  # Exit on any error
             
         except Exception as e:
-            logger.error(f"Error in volume maker cycle: {e}")
+            logger.error(f"Critical error in volume maker: {e}")
             self._save_wallets()
             return False
 
