@@ -78,7 +78,8 @@ class Config:
         self.TOKEN_SYMBOL = token_data.get('symbol', '')
         
         # Transaction configuration
-        self.BUY_AMOUNT = chain_config['transaction']['buy_amount']
+        self.MIN_BUY_AMOUNT = chain_config['transaction'].get('min_buy_amount')
+        self.MAX_BUY_AMOUNT = chain_config['transaction'].get('max_buy_amount')
         self.TRANSFER_PERCENTAGE = chain_config['transaction']['transfer_percentage']
         self.GAS_MULTIPLIER = chain_config['transaction']['gas_multiplier']
         self.WAIT_TIME = chain_config['transaction']['wait_time']
@@ -86,6 +87,10 @@ class Config:
         self.MAX_RETRIES = chain_config['transaction'].get('max_retries', 3)
         self.BACKOFF_FACTOR = chain_config['transaction'].get('backoff_factor', 2)
         self.MIN_BALANCE_THRESHOLD = chain_config['transaction'].get('min_balance_threshold', 0.00001)
+        
+        # Slippage settings
+        self.BUY_SLIPPAGE = chain_config['transaction'].get('buy_slippage', 0.005)  # Default 0.5%
+        self.SELL_SLIPPAGE = chain_config['transaction'].get('sell_slippage', 0.005)  # Default 0.5%
         
         # File paths
         self.CONFIG_FILE = 'config.json'
@@ -126,6 +131,9 @@ class VolumeMaker:
         # Create initial wallet if none exists
         if not self.wallets:
             self._initialize()
+        
+        # Load token ABI for balance checking - moved from _initialize to here
+        self.token_abi = json.loads('[{"constant":true,"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"name":"spender","type":"address"},{"name":"tokens","type":"uint256"}],"name":"approve","outputs":[{"name":"success","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"tokens","type":"uint256"}],"name":"transferFrom","outputs":[{"name":"success","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[{"name":"tokenOwner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"payable":false,"stateMutability":"view","type":"function"},{"constant":false,"inputs":[{"name":"to","type":"address"},{"name":"tokens","type":"uint256"}],"name":"transfer","outputs":[{"name":"success","type":"bool"}],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":true,"inputs":[{"name":"tokenOwner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"remaining","type":"uint256"}],"payable":false,"stateMutability":"view","type":"function"},{"anonymous":false,"inputs":[{"indexed":true,"name":"from","type":"address"},{"indexed":true,"name":"to","type":"address"},{"indexed":false,"name":"tokens","type":"uint256"}],"name":"Transfer","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"name":"tokenOwner","type":"address"},{"indexed":true,"name":"spender","type":"address"},{"indexed":false,"name":"tokens","type":"uint256"}],"name":"Approval","type":"event"}]')
         
         self.gas_manager = GasManager(self.w3, self.config.CHAIN_ID)
         
@@ -261,6 +269,8 @@ class VolumeMaker:
         """Create the first wallet to start the process."""
         self._generate_wallet()
         logger.info(f"Initialized with wallet: {self.wallets[0]['address']}")
+        
+        # The token_abi initialization has been moved to __init__
 
     def _generate_wallet(self):
         """Generate a new wallet and add it to the list."""
@@ -321,7 +331,7 @@ class VolumeMaker:
         return -1  # No wallet with sufficient balance found
 
     def buy_tokens(self):
-        """Buy tokens using the current wallet."""
+        """Buy tokens using the current wallet with a random amount between min and max."""
         try:
             current_wallet = self.wallets[self.index]
             gas_price = self._get_current_gas_price()
@@ -331,20 +341,17 @@ class VolumeMaker:
             # Initialize sniper with the current chain configuration
             sniper.init_globals(self.chain_name)
             
-            # Use a higher amount for the transaction to ensure it goes through
-            buy_amount = self.config.BUY_AMOUNT  # Use a higher amount that will be visible on-chain
+            # Determine buy amount: random between min and max, or exact amount if they're equal
+            if self.config.MIN_BUY_AMOUNT == self.config.MAX_BUY_AMOUNT:
+                buy_amount = self.config.MIN_BUY_AMOUNT
+            else:
+                # Import random here to keep it local to this function
+                import random
+                buy_amount = random.uniform(self.config.MIN_BUY_AMOUNT, self.config.MAX_BUY_AMOUNT)
             
-            # Use gas manager for transaction parameters
-            tx_params = {
-                'from': current_wallet['address'],
-                'value': self.w3.to_wei(buy_amount, 'ether'),
-                'nonce': self.w3.eth.get_transaction_count(current_wallet['address']),
-                'chainId': self.config.CHAIN_ID
-            }
+            logger.info(f"Selected buy amount: {buy_amount} {self.config.NATIVE_TOKEN}")
             
-            tx_params = self.gas_manager.prepare_transaction_params(tx_params)
-            
-            # Execute the buy transaction
+            # Execute the buy transaction - passing the original parameters
             success = sniper.ExactETHSwap(
                 buy_amount,
                 self.config.TOKEN_CONTRACT,
@@ -364,7 +371,7 @@ class VolumeMaker:
             return False
 
     def sell_tokens(self):
-        """Sell DAWAE tokens using the current wallet."""
+        """Sell tokens using the current wallet with improved error handling."""
         try:
             current_wallet = self.wallets[self.index]
             gas_price = self._get_current_gas_price()
@@ -374,38 +381,73 @@ class VolumeMaker:
             # Initialize sniper with the current chain configuration
             sniper.init_globals(self.chain_name)
             
-            # First approve tokens for spending
-            approval_success = sniper.approve_tokens(
-                self.config.TOKEN_CONTRACT,
-                current_wallet["address"],
-                current_wallet["private_key"],
-                gas_price
+            # Check token balance first
+            token_contract = Web3(Web3.HTTPProvider(sniper.rpc)).eth.contract(
+                address=self.config.TOKEN_CONTRACT, 
+                abi=self.token_abi
             )
             
-            if not approval_success:
-                logger.warning(f"Failed to approve tokens for wallet {current_wallet['address']}")
+            # Add balance check with proper decimal handling
+            token_balance = token_contract.functions.balanceOf(current_wallet["address"]).call()
+            decimals = token_contract.functions.decimals().call()
+            human_readable_balance = token_balance / (10 ** decimals)
+            
+            logger.info(f"Current token balance: {human_readable_balance} tokens")
+            
+            if token_balance == 0:
+                logger.error("No tokens to sell in wallet")
                 return False
             
-            # Always use a higher gas limit for selling (not just DAWAE on BSC)
-            special_gas_limit = 300000  # Increase default gas limit for sells
+            # Get potential ETH value before selling
+            potential_value = sniper.getProfit(self.config.TOKEN_CONTRACT, current_wallet["address"])
+            if potential_value:
+                logger.info(f"Potential ETH value if sold: {potential_value[1]} ETH")
             
-            # Execute the sell transaction
-            success = sniper.sellTokens(
+            # Verify approval status before selling
+            current_allowance = sniper.check_token_allowance(
                 self.config.TOKEN_CONTRACT,
                 current_wallet["address"],
-                current_wallet["private_key"],
-                gas_price,
-                gas_limit=special_gas_limit
+                sniper.contract.address
             )
             
-            if success:
-                logger.info(f"Successfully sold tokens with wallet {current_wallet['address']}")
-                return True
-            else:
-                logger.warning(f"Failed to sell tokens with wallet {current_wallet['address']}")
-                return False
+            if current_allowance < token_balance:
+                logger.warning("Insufficient allowance, requesting approval...")
+                approval_success = sniper.approve_tokens(
+                    self.config.TOKEN_CONTRACT,
+                    current_wallet["address"],
+                    current_wallet["private_key"],
+                    gas_price
+                )
+                if not approval_success:
+                    logger.error("Failed to approve tokens")
+                    return False
+                
+            # Attempt to sell with retries
+            for attempt in range(3):  # Try up to 3 times
+                try:
+                    sell_success = sniper.sellTokens(
+                        self.config.TOKEN_CONTRACT,
+                        current_wallet["address"],
+                        current_wallet["private_key"],
+                        gas_price
+                    )
+                    if sell_success:
+                        logger.info("Successfully sold tokens")
+                        return True
+                    else:
+                        logger.warning(f"Sell attempt {attempt + 1} failed, {'retrying' if attempt < 2 else 'giving up'}")
+                        time.sleep(2 * (attempt + 1))  # Exponential backoff
+                except Exception as e:
+                    logger.error(f"Error during sell attempt {attempt + 1}: {str(e)}")
+                    if attempt < 2:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                    return False
+                
+            return False
+            
         except Exception as e:
-            logger.error(f"Error selling tokens: {str(e)}")
+            logger.error(f"Critical error in sell_tokens: {str(e)}")
             return False
 
     def transfer_funds(self, from_index, to_index):

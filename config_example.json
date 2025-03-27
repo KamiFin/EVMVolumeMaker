@@ -1322,13 +1322,17 @@
             },
             "transaction": {
                 "buy_amount": 0.001,
+                "max_buy_amount": 0.001,
+                "min_buy_amount": 0.001,
                 "transfer_percentage": 1,
                 "gas_multiplier": 1,
                 "wait_time": 3,
                 "max_retries": 3,
                 "backoff_factor": 2,
                 "min_balance_threshold": 0.00001,
-                "trade_wait_time": 1
+                "trade_wait_time": 1,
+                "buy_slippage": 0.01,
+                "sell_slippage": 0.01
             }
         },
         "base": {
@@ -1356,13 +1360,15 @@
             },
             "transaction": {
                 "buy_amount": 1e-12,
+                "min_buy_amount": 1e-12,
+                "max_buy_amount": 1e-6, 
                 "transfer_percentage": 1,
                 "gas_multiplier": 1,
                 "wait_time": 3,
+                "trade_wait_time": 1, 
                 "max_retries": 3,
                 "backoff_factor": 2,
-                "min_balance_threshold": 0.00001,
-                "trade_wait_time": 1
+                "min_balance_threshold": 0.00001
             }
         },
         "bsc": {
@@ -2355,6 +2361,8 @@
             },
             "transaction": {
                 "buy_amount": 0.00001,
+                "min_buy_amount": 0.00001,
+                "max_buy_amount": 0.00005, 
                 "transfer_percentage": 1,
                 "gas_multiplier": 1,
                 "wait_time": 3,

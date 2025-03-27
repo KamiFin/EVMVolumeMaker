@@ -30,6 +30,11 @@ class Config:
         self.wrapped_native_token = self.chain_config['dex']['wrapped_native_token']
         self.token_contract = next(iter(self.chain_config['token'].values()))['contract_address']
         self.dex_type = self.chain_config.get('dex_type', 'uniswap')  # Default to uniswap for backward compatibility
+        
+        # Slippage settings
+        self.buy_slippage = self.chain_config['transaction'].get('buy_slippage', 0.005)  # Default 0.5%
+        self.sell_slippage = self.chain_config['transaction'].get('sell_slippage', 0.005)  # Default 0.5%
+        
         self.gas_manager = None  # Will be initialized after web3 connection
 
 # Global variables that will be initialized based on config
@@ -86,7 +91,8 @@ def init_globals(chain_name):
 tokenAbi = [
     {"constant":True,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"payable":False,"stateMutability":"view","type":"function"},
     {"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
-    {"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}
+    {"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+    {"constant": True, "inputs": [{"name": "owner", "type": "address"}, {"name": "spender", "type": "address"}], "name": "allowance", "outputs": [{"name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"}
 ]
 
 tempHashes = []
@@ -261,16 +267,46 @@ def ExactETHSwap(_ethAmount, _tokenContract, _sender, _pk, _gas=None, max_retrie
             # Use gas manager to prepare transaction params
             tx_params = config.gas_manager.prepare_transaction_params(tx_params)
             
-            # Prepare the swap function call
+            # Prepare the swap paths
             if dex_type == 'shadow':
                 routes = [{"from": eth, "to": _tokenContract, "stable": False}]
+                
+                # Get expected output with amounts_out call
+                try:
+                    expected_output = contract.functions.getAmountsOut(
+                        web3.to_wei(float(_ethAmount), 'ether'),
+                        routes
+                    ).call()[1]
+                    
+                    # Apply slippage tolerance
+                    min_output = int(expected_output * (1 - config.buy_slippage))
+                    logger.info(f"Expected output: {expected_output}, Minimum with {config.buy_slippage*100}% slippage: {min_output}")
+                except Exception as e:
+                    logger.warning(f"Could not calculate minimum output: {e}")
+                    min_output = 0  # Fallback to 0 if estimation fails
+                
                 swap_function = contract.functions.swapExactETHForTokens(
-                    0, routes, _sender, (int(time.time()) + 10000)
+                    min_output, routes, _sender, (int(time.time()) + 10000)
                 )
             else:
                 path = [eth, _tokenContract]
+                
+                # Get expected output with amounts_out call
+                try:
+                    expected_output = contract.functions.getAmountsOut(
+                        web3.to_wei(float(_ethAmount), 'ether'),
+                        path
+                    ).call()[1]
+                    
+                    # Apply slippage tolerance
+                    min_output = int(expected_output * (1 - config.buy_slippage))
+                    logger.info(f"Expected output: {expected_output}, Minimum with {config.buy_slippage*100}% slippage: {min_output}")
+                except Exception as e:
+                    logger.warning(f"Could not calculate minimum output: {e}")
+                    min_output = 0  # Fallback to 0 if estimation fails
+                
                 swap_function = contract.functions.swapExactETHForTokens(
-                    0, path, _sender, (int(time.time()) + 10000)
+                    min_output, path, _sender, (int(time.time()) + 10000)
                 )
             
             # Estimate gas limit for this specific transaction
@@ -337,7 +373,14 @@ def getProfit(_tokenContract, _sender):
     values = []  # 0 is token balance, 1 is eth conversion if sell
     
     try:
-        profit = contract.functions.getAmountsOut(balance, [_tokenContract, eth]).call()
+        # Use the correct route structure based on DEX type
+        if dex_type == 'shadow':
+            routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+            profit = contract.functions.getAmountsOut(balance, routes).call()
+        else:
+            # Standard Uniswap V2 path
+            profit = contract.functions.getAmountsOut(balance, [_tokenContract, eth]).call()
+            
         values.append(int(str(balance)[:-decimals]))
         values.append(round(web3.from_wei(profit[1], 'ether'), 2))
         return values
@@ -346,15 +389,11 @@ def getProfit(_tokenContract, _sender):
         return None
 
 def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1, gas_limit=None):
-    """Sell tokens for ETH"""
+    """Sell tokens for ETH with enhanced error handling"""
     try:
-        logger.info(f"Selling tokens from {_sender}")
+        logger.info(f"Starting sell process for {_sender}")
         
-        # Use provided gas limit or default
-        if gas_limit is None:
-            gas_limit = 1000000
-        
-        # Token Balance
+        # Get token balance first
         _tokenContract = web3.to_checksum_address(_tokenContract)
         Tkcontract = web3.eth.contract(address=_tokenContract, abi=tokenAbi)
         balance = Tkcontract.functions.balanceOf(_sender).call()
@@ -362,45 +401,42 @@ def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1, gas_limit=None)
         
         logger.info(f"Token balance: {balance}")
         
-        # Add slippage tolerance - accept 95% of expected output
-        min_output = int(profit[1] * 0.95) if 'profit' in locals() else 0
+        # Calculate amount to sell based on percentage parameter
+        amount_to_sell = int(balance * percentage)
         
-        # Check DEX type and adjust route structure
-        if dex_type == "shadow":
-            # Shadow DEX specific handling
-            routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+        # Shadow/Sonic DEX specific route structure
+        routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+        
+        # Calculate expected ETH output with slippage protection
+        try:
+            expected_eth = contract.functions.getAmountsOut(
+                amount_to_sell,
+                routes  # Using the correct route structure
+            ).call()[1]
             
-            tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-                int(balance / percentage),
-                min_output,  # Add minimum output with slippage
-                routes,
-                _sender,
-                (int(time.time()) + 10000)
-            ).build_transaction({
-                'from': _sender,
-                'value': 0,
-                'gas': gas_limit,
-                'gasPrice': web3.to_wei(_gas, 'gwei'),
-                'nonce': web3.eth.get_transaction_count(_sender),
-            })
-        else:
-            # Default implementation for other DEX types (standard Uniswap V2)
-            path = [_tokenContract, eth]
-            
-            tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-                int(balance / percentage),
-                min_output,  # Add minimum output with slippage
-                path,
-                _sender,
-                (int(time.time()) + 10000)
-            ).build_transaction({
-                'from': _sender,
-                'value': 0,
-                'gas': gas_limit,
-                'gasPrice': web3.to_wei(_gas, 'gwei'),
-                'nonce': web3.eth.get_transaction_count(_sender),
-            })
-
+            # Apply slippage tolerance
+            min_output = int(expected_eth * (1 - config.sell_slippage))
+            logger.info(f"Expected ETH output: {web3.from_wei(expected_eth, 'ether')}, " +
+                        f"Minimum with {config.sell_slippage*100}% slippage: {web3.from_wei(min_output, 'ether')}")
+        except Exception as e:
+            logger.warning(f"Could not calculate minimum output: {e}")
+            min_output = 0  # Fallback to 0 if estimation fails
+        
+        # Build the transaction with the correct route structure
+        tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            amount_to_sell,
+            min_output,
+            routes,  # Using the correct route structure
+            _sender,
+            (int(time.time()) + 10000)
+        ).build_transaction({
+            'from': _sender,
+            'value': 0,
+            'gas': gas_limit or 1000000,
+            'gasPrice': web3.to_wei(_gas, 'gwei'),
+            'nonce': web3.eth.get_transaction_count(_sender),
+        })
+        
         logger.info("Signing transaction...")
         signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
         tx_token = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
@@ -410,52 +446,87 @@ def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1, gas_limit=None)
             # Get transaction details for debugging
             tx_details = web3.eth.get_transaction(receipt['transactionHash'].hex())
             logger.error(f"Sell transaction failed. Details: {tx_details}")
-            
-            # Try to get the revert reason if possible
-            try:
-                tx_trace = web3.provider.make_request("debug_traceTransaction", [receipt['transactionHash'].hex()])
-                logger.error(f"Transaction trace: {tx_trace}")
-            except Exception as trace_error:
-                logger.error(f"Could not get trace: {trace_error}")
-            
             return False
         else:
             logger.info("CONFIRMED: Transaction successful")
             return True
+            
     except Exception as e:
-        logger.error(f"Error in sellTokens: {e}")
+        logger.error(f"Error in sellTokens: {str(e)}")
         return False
 
-def approveToken(_tokenContract, _sender, _pk):
-    """Approve token for trading on DEX"""
+def check_token_allowance(_tokenContract, _sender, spender):
+    """Check current token allowance for spender"""
     try:
-        nonce = web3.eth.get_transaction_count(_sender)
+        _tokenContract = web3.to_checksum_address(_tokenContract)
+        token_contract = web3.eth.contract(address=_tokenContract, abi=tokenAbi)
+        current_allowance = token_contract.functions.allowance(_sender, spender).call()
+        return current_allowance
+    except Exception as e:
+        logger.error(f"Error checking allowance: {e}")
+        return 0
+
+def approve_tokens(_tokenContract, _sender, _pk, _gas, max_retries=2):
+    """Approve tokens for router spending with allowance check"""
+    try:
+        logger.info(f"Checking current allowance for {_sender}")
+        
         _tokenContract = web3.to_checksum_address(_tokenContract)
         Tkcontract = web3.eth.contract(address=_tokenContract, abi=tokenAbi)
         
-        # Use the correct router address for approval
-        tx = Tkcontract.functions.approve(
-            uniSwap,  # Use the router address defined at the top
-            115792089237316195423570985008687907853269984665640564039457584007913129639935,  # Max uint256
-        ).build_transaction({
-            'from': _sender,
-            'value': 0,
-            'nonce': nonce,
-        })
+        # Check current allowance
+        current_allowance = check_token_allowance(_tokenContract, _sender, contract.address)
+        max_approval = 2**256 - 1
         
-        logger.info("Approving token for trading...")
-        signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
-        tx_token = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-        receipt = web3.eth.wait_for_transaction_receipt(tx_token)
-        
-        if receipt['status'] == 1:
-            logger.info("CONFIRMED: Token approval successful")
+        # If allowance is already high enough, skip approval
+        if current_allowance > (max_approval // 2):
+            logger.info("Token already has sufficient allowance")
             return True
-        else:
-            logger.error(f"Token approval failed with status: {receipt['status']}")
-            return False
+            
+        for attempt in range(1, max_retries + 1):
+            try:
+                nonce = web3.eth.get_transaction_count(_sender)
+                
+                # Build approval transaction
+                tx = Tkcontract.functions.approve(
+                    contract.address,  # Router contract
+                    max_approval
+                ).build_transaction({
+                    'from': _sender,
+                    'gas': 100000,  # Gas limit for approval
+                    'gasPrice': web3.to_wei(_gas, 'gwei'),
+                    'nonce': nonce,
+                })
+                
+                # Sign and send transaction
+                signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
+                tx_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                
+                logger.info(f"Approval transaction sent: {tx_hash.hex()}")
+                receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+                
+                if receipt['status'] == 1:
+                    logger.info("CONFIRMED: Approval transaction successful")
+                    return True
+                else:
+                    logger.error(f"Approval transaction failed with status: {receipt['status']}")
+                    if attempt < max_retries:
+                        logger.warning(f"Retrying approval ({attempt}/{max_retries})...")
+                        time.sleep(2)
+                    else:
+                        return False
+                        
+            except Exception as e:
+                logger.error(f"Error in token approval (attempt {attempt}): {e}")
+                if attempt < max_retries:
+                    time.sleep(2)
+                else:
+                    return False
+        
+        return False
+        
     except Exception as e:
-        logger.error(f"Error approving token: {e}")
+        logger.error(f"Error approving tokens: {e}")
         return False
 
 async def scannerPending():
@@ -501,63 +572,6 @@ def check_pair_exists(_tokenContract):
             
     except Exception as e:
         logger.error(f"Error checking pair existence: {e}")
-        return False
-
-def approve_tokens(_tokenContract, _sender, _pk, _gas, max_retries=2):
-    """Approve tokens for router spending"""
-    try:
-        logger.info(f"Approving tokens for spending from {_sender}")
-        
-        _tokenContract = web3.to_checksum_address(_tokenContract)
-        Tkcontract = web3.eth.contract(address=_tokenContract, abi=tokenAbi)
-        
-        # Get token balance and approve MAX_UINT for simplicity
-        max_approval = 2**256 - 1
-        
-        for attempt in range(1, max_retries + 1):
-            try:
-                nonce = web3.eth.get_transaction_count(_sender)
-                
-                # Build approval transaction
-                tx = Tkcontract.functions.approve(
-                    contract.address,  # Router contract
-                    max_approval
-                ).build_transaction({
-                    'from': _sender,
-                    'gas': 100000,  # Gas limit for approval
-                    'gasPrice': web3.to_wei(_gas, 'gwei'),
-                    'nonce': nonce,
-                })
-                
-                # Sign and send transaction
-                signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
-                tx_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-                
-                logger.info(f"Approval transaction sent: {tx_hash.hex()}")
-                receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-                
-                if receipt['status'] == 1:
-                    logger.info("CONFIRMED: Approval transaction successful")
-                    return True
-                else:
-                    logger.error(f"Approval transaction failed with status: {receipt['status']}")
-                    if attempt < max_retries:
-                        logger.warning(f"Retrying approval ({attempt}/{max_retries})...")
-                        time.sleep(2)
-                    else:
-                        return False
-                        
-            except Exception as e:
-                logger.error(f"Error in token approval (attempt {attempt}): {e}")
-                if attempt < max_retries:
-                    time.sleep(2)
-                else:
-                    return False
-        
-        return False
-        
-    except Exception as e:
-        logger.error(f"Error approving tokens: {e}")
         return False
 
 if __name__ == "__main__":
