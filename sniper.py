@@ -345,55 +345,85 @@ def getProfit(_tokenContract, _sender):
         logger.error(f"Error getting profit: {e}")
         return None
 
-def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1):
+def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1, gas_limit=None):
     """Sell tokens for ETH"""
     try:
         logger.info(f"Selling tokens from {_sender}")
         
-        nonce = web3.eth.get_transaction_count(_sender)
+        # Use provided gas limit or default
+        if gas_limit is None:
+            gas_limit = 1000000
+        
         # Token Balance
         _tokenContract = web3.to_checksum_address(_tokenContract)
         Tkcontract = web3.eth.contract(address=_tokenContract, abi=tokenAbi)
         balance = Tkcontract.functions.balanceOf(_sender).call()
-        # Get Decimals
         decimals = Tkcontract.functions.decimals().call()
         
         logger.info(f"Token balance: {balance}")
         
-        # Create the route structure that Sonic expects
-        routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+        # Add slippage tolerance - accept 95% of expected output
+        min_output = int(profit[1] * 0.95) if 'profit' in locals() else 0
         
-        tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            int(balance / percentage),
-            0,
-            routes,
-            _sender,
-            (int(time.time()) + 10000)
-        ).build_transaction({
-            'from': _sender,
-            'value': 0,
-            'gas': 1000000,
-            'gasPrice': web3.to_wei(_gas, 'gwei'),
-            'nonce': nonce,
-        })
-        
-        # Use getAmountsOut with the correct route structure
-        profit = contract.functions.getAmountsOut(balance, routes).call()
-        logger.info(f"Token amount: {str(balance)[:-decimals]}")
-        logger.info(f"Expected ETH: {round(web3.from_wei(profit[1], 'ether'), 2)}")
-        
+        # Check DEX type and adjust route structure
+        if dex_type == "shadow":
+            # Shadow DEX specific handling
+            routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+            
+            tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
+                int(balance / percentage),
+                min_output,  # Add minimum output with slippage
+                routes,
+                _sender,
+                (int(time.time()) + 10000)
+            ).build_transaction({
+                'from': _sender,
+                'value': 0,
+                'gas': gas_limit,
+                'gasPrice': web3.to_wei(_gas, 'gwei'),
+                'nonce': web3.eth.get_transaction_count(_sender),
+            })
+        else:
+            # Default implementation for other DEX types (standard Uniswap V2)
+            path = [_tokenContract, eth]
+            
+            tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
+                int(balance / percentage),
+                min_output,  # Add minimum output with slippage
+                path,
+                _sender,
+                (int(time.time()) + 10000)
+            ).build_transaction({
+                'from': _sender,
+                'value': 0,
+                'gas': gas_limit,
+                'gasPrice': web3.to_wei(_gas, 'gwei'),
+                'nonce': web3.eth.get_transaction_count(_sender),
+            })
+
+        logger.info("Signing transaction...")
         signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
         tx_token = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
         receipt = web3.eth.wait_for_transaction_receipt(tx_token)
         
-        if receipt['status'] == 1:
-            logger.info("CONFIRMED: Sell transaction successful")
-            return True
-        else:
-            logger.error(f"Sell transaction failed with status: {receipt['status']}")
+        if receipt['status'] == 0:
+            # Get transaction details for debugging
+            tx_details = web3.eth.get_transaction(receipt['transactionHash'].hex())
+            logger.error(f"Sell transaction failed. Details: {tx_details}")
+            
+            # Try to get the revert reason if possible
+            try:
+                tx_trace = web3.provider.make_request("debug_traceTransaction", [receipt['transactionHash'].hex()])
+                logger.error(f"Transaction trace: {tx_trace}")
+            except Exception as trace_error:
+                logger.error(f"Could not get trace: {trace_error}")
+            
             return False
+        else:
+            logger.info("CONFIRMED: Transaction successful")
+            return True
     except Exception as e:
-        logger.error(f"Error selling tokens: {e}")
+        logger.error(f"Error in sellTokens: {e}")
         return False
 
 def approveToken(_tokenContract, _sender, _pk):
@@ -471,6 +501,63 @@ def check_pair_exists(_tokenContract):
             
     except Exception as e:
         logger.error(f"Error checking pair existence: {e}")
+        return False
+
+def approve_tokens(_tokenContract, _sender, _pk, _gas, max_retries=2):
+    """Approve tokens for router spending"""
+    try:
+        logger.info(f"Approving tokens for spending from {_sender}")
+        
+        _tokenContract = web3.to_checksum_address(_tokenContract)
+        Tkcontract = web3.eth.contract(address=_tokenContract, abi=tokenAbi)
+        
+        # Get token balance and approve MAX_UINT for simplicity
+        max_approval = 2**256 - 1
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                nonce = web3.eth.get_transaction_count(_sender)
+                
+                # Build approval transaction
+                tx = Tkcontract.functions.approve(
+                    contract.address,  # Router contract
+                    max_approval
+                ).build_transaction({
+                    'from': _sender,
+                    'gas': 100000,  # Gas limit for approval
+                    'gasPrice': web3.to_wei(_gas, 'gwei'),
+                    'nonce': nonce,
+                })
+                
+                # Sign and send transaction
+                signed_txn = web3.eth.account.sign_transaction(tx, private_key=_pk)
+                tx_hash = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                
+                logger.info(f"Approval transaction sent: {tx_hash.hex()}")
+                receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+                
+                if receipt['status'] == 1:
+                    logger.info("CONFIRMED: Approval transaction successful")
+                    return True
+                else:
+                    logger.error(f"Approval transaction failed with status: {receipt['status']}")
+                    if attempt < max_retries:
+                        logger.warning(f"Retrying approval ({attempt}/{max_retries})...")
+                        time.sleep(2)
+                    else:
+                        return False
+                        
+            except Exception as e:
+                logger.error(f"Error in token approval (attempt {attempt}): {e}")
+                if attempt < max_retries:
+                    time.sleep(2)
+                else:
+                    return False
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error approving tokens: {e}")
         return False
 
 if __name__ == "__main__":

@@ -1327,7 +1327,8 @@
                 "wait_time": 3,
                 "max_retries": 3,
                 "backoff_factor": 2,
-                "min_balance_threshold": 0.00001
+                "min_balance_threshold": 0.00001,
+                "trade_wait_time": 1
             }
         },
         "base": {
@@ -1360,7 +1361,8 @@
                 "wait_time": 3,
                 "max_retries": 3,
                 "backoff_factor": 2,
-                "min_balance_threshold": 0.00001
+                "min_balance_threshold": 0.00001,
+                "trade_wait_time": 1
             }
         },
         "bsc": {
@@ -2356,6 +2358,7 @@
                 "transfer_percentage": 1,
                 "gas_multiplier": 1,
                 "wait_time": 3,
+                "trade_wait_time": 1, 
                 "max_retries": 3,
                 "backoff_factor": 2,
                 "min_balance_threshold": 0.00001

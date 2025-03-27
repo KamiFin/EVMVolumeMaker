@@ -108,6 +108,24 @@ Run the volume maker script for a specific chain:
 python maker.py sonic
 ```
 
+You can also specify the operation mode:
+
+```bash
+# Buy tokens (default mode)
+python maker.py sonic --mode buy
+
+# Sell tokens
+python maker.py sonic --mode sell
+
+# Buy then sell (trade mode)
+python maker.py sonic --mode trade
+```
+
+Different modes:
+- `buy`: Purchases tokens and transfers funds to a new wallet
+- `sell`: Sells tokens and transfers remaining funds to a new wallet
+- `trade`: First buys tokens, then sells them before transferring funds to a new wallet
+
 ### Token Sniper
 
 Run the sniper in monitoring mode:

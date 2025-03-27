@@ -73,13 +73,16 @@ class Config:
         self.WRAPPED_NATIVE_TOKEN = chain_config['dex']['wrapped_native_token']
         
         # Token configuration
-        self.TOKEN_CONTRACT = next(iter(chain_config['token'].values()))['contract_address']
+        token_data = next(iter(chain_config['token'].values()))
+        self.TOKEN_CONTRACT = token_data['contract_address']
+        self.TOKEN_SYMBOL = token_data.get('symbol', '')
         
         # Transaction configuration
         self.BUY_AMOUNT = chain_config['transaction']['buy_amount']
         self.TRANSFER_PERCENTAGE = chain_config['transaction']['transfer_percentage']
         self.GAS_MULTIPLIER = chain_config['transaction']['gas_multiplier']
         self.WAIT_TIME = chain_config['transaction']['wait_time']
+        self.TRADE_WAIT_TIME = chain_config['transaction'].get('trade_wait_time', 1)  # Default to 1 second
         self.MAX_RETRIES = chain_config['transaction'].get('max_retries', 3)
         self.BACKOFF_FACTOR = chain_config['transaction'].get('backoff_factor', 2)
         self.MIN_BALANCE_THRESHOLD = chain_config['transaction'].get('min_balance_threshold', 0.00001)
@@ -92,10 +95,18 @@ class CycleResult(Enum):
     STOP = False     # Stop and mark wallet as failed
 
 class VolumeMaker:
-    def __init__(self, chain_name):
-        """Initialize the volume maker with web3 connection and wallet management."""
-        self.config = Config(chain_name)
+    def __init__(self, chain_name, mode='buy'):
+        """Initialize volume maker for a specific chain"""
         self.chain_name = chain_name
+        self.mode = mode  # 'buy' or 'sell' or 'trade'
+        
+        # Load configuration
+        try:
+            self.config = Config(chain_name)
+        except ValueError as e:
+            logger.error(f"Configuration error: {e}")
+            sys.exit(1)
+        
         self.current_rpc_index = 0
         self.w3 = self._get_web3_connection()
         
@@ -352,6 +363,51 @@ class VolumeMaker:
             logger.error(f"Error buying tokens: {str(e)}")
             return False
 
+    def sell_tokens(self):
+        """Sell DAWAE tokens using the current wallet."""
+        try:
+            current_wallet = self.wallets[self.index]
+            gas_price = self._get_current_gas_price()
+            
+            logger.info(f"Selling tokens with wallet {current_wallet['address']}")
+            
+            # Initialize sniper with the current chain configuration
+            sniper.init_globals(self.chain_name)
+            
+            # First approve tokens for spending
+            approval_success = sniper.approve_tokens(
+                self.config.TOKEN_CONTRACT,
+                current_wallet["address"],
+                current_wallet["private_key"],
+                gas_price
+            )
+            
+            if not approval_success:
+                logger.warning(f"Failed to approve tokens for wallet {current_wallet['address']}")
+                return False
+            
+            # Always use a higher gas limit for selling (not just DAWAE on BSC)
+            special_gas_limit = 300000  # Increase default gas limit for sells
+            
+            # Execute the sell transaction
+            success = sniper.sellTokens(
+                self.config.TOKEN_CONTRACT,
+                current_wallet["address"],
+                current_wallet["private_key"],
+                gas_price,
+                gas_limit=special_gas_limit
+            )
+            
+            if success:
+                logger.info(f"Successfully sold tokens with wallet {current_wallet['address']}")
+                return True
+            else:
+                logger.warning(f"Failed to sell tokens with wallet {current_wallet['address']}")
+                return False
+        except Exception as e:
+            logger.error(f"Error selling tokens: {str(e)}")
+            return False
+
     def transfer_funds(self, from_index, to_index):
         """Transfer maximum funds from one wallet to another with robust error handling and RPC switching."""
         try:
@@ -478,11 +534,39 @@ class VolumeMaker:
                 logger.error(f"Token pair does not exist on the DEX. Please create liquidity first.")
                 return CycleResult.STOP  # Stop if pair doesn't exist
             
-            # 1. Buy tokens with current wallet
-            buy_success = self.buy_tokens()
-            if not buy_success:
-                logger.error("Buy operation failed")
-                return CycleResult.STOP  # Stop if buy fails
+            # Perform operations based on mode
+            if self.mode == 'buy':
+                # Buy tokens with current wallet
+                operation_success = self.buy_tokens()
+                if not operation_success:
+                    logger.error("Buy operation failed")
+                    return CycleResult.STOP
+            elif self.mode == 'sell':
+                # Sell tokens with current wallet
+                operation_success = self.sell_tokens()
+                if not operation_success:
+                    logger.error("Sell operation failed")
+                    return CycleResult.STOP
+            elif self.mode == 'trade':
+                # First buy tokens
+                buy_success = self.buy_tokens()
+                if not buy_success:
+                    logger.error("Buy operation failed in trade mode")
+                    return CycleResult.STOP
+                
+                # Wait between buy and sell (using the custom parameter)
+                trade_wait_time = self.config.TRADE_WAIT_TIME
+                logger.info(f"Waiting {trade_wait_time} seconds between buy and sell operations")
+                time.sleep(trade_wait_time)
+                
+                # Then sell tokens
+                sell_success = self.sell_tokens()
+                if not sell_success:
+                    logger.error("Sell operation failed in trade mode")
+                    return CycleResult.STOP
+            else:
+                logger.error(f"Unknown operation mode: {self.mode}")
+                return CycleResult.STOP
             
             # 2. Generate new wallet
             new_wallet = self._generate_wallet()
@@ -571,9 +655,11 @@ if __name__ == "__main__":
         # Set up argument parser
         parser = argparse.ArgumentParser(description='Volume maker for DEX trading')
         parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum)')
+        parser.add_argument('--mode', choices=['buy', 'sell', 'trade'], default='buy', 
+                          help='Operation mode: buy tokens, sell tokens, or buy then sell (default: buy)')
         args = parser.parse_args()
 
-        maker = VolumeMaker(args.chain)
+        maker = VolumeMaker(args.chain, args.mode)
         maker.run()
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
