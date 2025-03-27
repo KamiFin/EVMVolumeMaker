@@ -100,10 +100,18 @@ class CycleResult(Enum):
     STOP = False     # Stop and mark wallet as failed
 
 class VolumeMaker:
-    def __init__(self, chain_name, mode='buy'):
-        """Initialize volume maker for a specific chain"""
+    def __init__(self, chain_name, mode='buy', single_wallet=False):
+        """
+        Initialize volume maker for a specific chain
+        
+        Args:
+            chain_name (str): Name of the chain to operate on
+            mode (str): Operation mode ('buy', 'sell', or 'trade')
+            single_wallet (bool): If True, only use the first wallet without creating new ones
+        """
         self.chain_name = chain_name
         self.mode = mode  # 'buy' or 'sell' or 'trade'
+        self.single_wallet = single_wallet
         
         # Load configuration
         try:
@@ -285,11 +293,11 @@ class VolumeMaker:
         return wallet
 
     def _increment_index(self):
-        """Increment the wallet index."""
-        self.index += 1
-        if self.index >= len(self.wallets):
-            self.index = 0
-        logger.info(f"Moved to wallet index {self.index}")
+        """Increment wallet index or reset to 0 if using single wallet mode"""
+        if self.single_wallet:
+            self.index = 0  # Always stay on first wallet
+        else:
+            self.index = (self.index + 1) % len(self.wallets)
 
     def _get_current_gas_price(self):
         """Get the current gas price with a multiplier."""
@@ -610,25 +618,32 @@ class VolumeMaker:
                 logger.error(f"Unknown operation mode: {self.mode}")
                 return CycleResult.STOP
             
-            # 2. Generate new wallet
-            new_wallet = self._generate_wallet()
-            logger.info("New wallet generated and saved to config")
+            # Skip wallet creation and fund transfer in single wallet mode
+            if not self.single_wallet:
+                # 2. Generate new wallet
+                new_wallet = self._generate_wallet()
+                logger.info("New wallet generated and saved to config")
+                
+                # 3. Wait for transactions to be mined
+                wait_time = self.config.WAIT_TIME
+                logger.info(f"Waiting {wait_time} seconds for transactions to be mined")
+                time.sleep(wait_time)
+                
+                # 4. Transfer funds to the new wallet
+                transfer_success = self.transfer_funds(self.index, len(self.wallets) - 1)
+                if not transfer_success:
+                    logger.error("Transfer failed - stopping cycle")
+                    return CycleResult.STOP  # Stop if transfer fails
+            else:
+                # In single wallet mode, just wait for transactions to be mined
+                wait_time = self.config.WAIT_TIME
+                logger.info(f"Single wallet mode: Waiting {wait_time} seconds for transactions to be mined")
+                time.sleep(wait_time)
             
-            # 3. Wait for transactions to be mined
-            wait_time = self.config.WAIT_TIME
-            logger.info(f"Waiting {wait_time} seconds for transactions to be mined")
-            time.sleep(wait_time)
-            
-            # 4. Transfer funds to the new wallet
-            transfer_success = self.transfer_funds(self.index, len(self.wallets) - 1)
-            if not transfer_success:
-                logger.error("Transfer failed - stopping cycle")
-                return CycleResult.STOP  # Stop if transfer fails
-            
-            # 5. Move to the next wallet
+            # 5. Move to the next wallet (will stay at index 0 in single wallet mode due to _increment_index logic)
             self._increment_index()
             
-            logger.info(f"Completed cycle {self.index}. Moving to next wallet.")
+            logger.info(f"Completed cycle {self.index}.")
             return CycleResult.CONTINUE
             
         except Exception as e:
@@ -699,9 +714,11 @@ if __name__ == "__main__":
         parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum)')
         parser.add_argument('--mode', choices=['buy', 'sell', 'trade'], default='buy', 
                           help='Operation mode: buy tokens, sell tokens, or buy then sell (default: buy)')
+        parser.add_argument('--single-wallet', '-s', action='store_true',
+                          help='Use only the first wallet without creating new ones')
         args = parser.parse_args()
 
-        maker = VolumeMaker(args.chain, args.mode)
+        maker = VolumeMaker(args.chain, args.mode, args.single_wallet)
         maker.run()
     except Exception as e:
         logger.critical(f"Fatal error: {e}")

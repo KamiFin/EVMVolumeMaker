@@ -119,12 +119,19 @@ python maker.py sonic --mode sell
 
 # Buy then sell (trade mode)
 python maker.py sonic --mode trade
+
+# Use single wallet mode (no new wallet creation or fund transfers)
+python maker.py sonic --single-wallet
+
+# Combine modes
+python maker.py sonic --mode trade --single-wallet
 ```
 
 Different modes:
 - `buy`: Purchases tokens and transfers funds to a new wallet
 - `sell`: Sells tokens and transfers remaining funds to a new wallet
 - `trade`: First buys tokens, then sells them before transferring funds to a new wallet
+- `single-wallet`: Uses only the first wallet without creating new ones or transferring funds
 
 ### Token Sniper
 
