@@ -389,7 +389,17 @@ def getProfit(_tokenContract, _sender):
         return None
 
 def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1, gas_limit=None):
-    """Sell tokens for ETH with enhanced error handling"""
+    """
+    Sell tokens for ETH with support for both Uniswap and Shadow DEX types
+    
+    Args:
+        _tokenContract (str): Token contract address
+        _sender (str): Seller's address
+        _pk (str): Private key
+        _gas (float): Gas price
+        percentage (float): Percentage of tokens to sell (1 = 100%)
+        gas_limit (int, optional): Custom gas limit
+    """
     try:
         logger.info(f"Starting sell process for {_sender}")
         
@@ -404,32 +414,75 @@ def sellTokens(_tokenContract, _sender, _pk, _gas, percentage=1, gas_limit=None)
         # Calculate amount to sell based on percentage parameter
         amount_to_sell = int(balance * percentage)
         
-        # Shadow/Sonic DEX specific route structure
-        routes = [{"from": _tokenContract, "to": eth, "stable": False}]
-        
         # Calculate expected ETH output with slippage protection
         try:
-            expected_eth = contract.functions.getAmountsOut(
-                amount_to_sell,
-                routes  # Using the correct route structure
-            ).call()[1]
+            if dex_type == 'shadow':
+                # Shadow/Sonic DEX specific route structure
+                routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+                expected_eth = contract.functions.getAmountsOut(
+                    amount_to_sell,
+                    routes
+                ).call()[1]
+            else:
+                # Standard Uniswap V2 path
+                path = [_tokenContract, eth]
+                expected_eth = contract.functions.getAmountsOut(
+                    amount_to_sell,
+                    path
+                ).call()[1]
             
             # Apply slippage tolerance
             min_output = int(expected_eth * (1 - config.sell_slippage))
             logger.info(f"Expected ETH output: {web3.from_wei(expected_eth, 'ether')}, " +
-                        f"Minimum with {config.sell_slippage*100}% slippage: {web3.from_wei(min_output, 'ether')}")
+                       f"Minimum with {config.sell_slippage*100}% slippage: {web3.from_wei(min_output, 'ether')}")
         except Exception as e:
             logger.warning(f"Could not calculate minimum output: {e}")
             min_output = 0  # Fallback to 0 if estimation fails
-        
-        # Build the transaction with the correct route structure
-        tx = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            amount_to_sell,
-            min_output,
-            routes,  # Using the correct route structure
-            _sender,
-            (int(time.time()) + 10000)
-        ).build_transaction({
+            
+        # Approve token spending if needed
+        try:
+            allowance = Tkcontract.functions.allowance(_sender, contract.address).call()
+            if allowance < amount_to_sell:
+                approve_tx = Tkcontract.functions.approve(
+                    contract.address,
+                    2**256 - 1  # Max approval
+                ).build_transaction({
+                    'from': _sender,
+                    'nonce': web3.eth.get_transaction_count(_sender),
+                    'gasPrice': web3.eth.gas_price
+                })
+                
+                signed_approve = web3.eth.account.sign_transaction(approve_tx, _pk)
+                tx_hash = web3.eth.send_raw_transaction(signed_approve.rawTransaction)
+                web3.eth.wait_for_transaction_receipt(tx_hash)
+                logger.info("Token approval successful")
+        except Exception as e:
+            logger.error(f"Error in token approval: {e}")
+            return False
+
+        # Build the swap transaction based on DEX type
+        if dex_type == 'shadow':
+            routes = [{"from": _tokenContract, "to": eth, "stable": False}]
+            swap_function = contract.functions.swapExactTokensForETH(
+                amount_to_sell,
+                min_output,
+                routes,
+                _sender,
+                int(time.time()) + 10000
+            )
+        else:
+            # Standard Uniswap V2 interface
+            path = [_tokenContract, eth]
+            swap_function = contract.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
+                amount_to_sell,
+                min_output,
+                path,
+                _sender,
+                int(time.time()) + 10000
+            )
+
+        # Build the transaction
+        tx = swap_function.build_transaction({
             'from': _sender,
             'value': 0,
             'gas': gas_limit or 1000000,
