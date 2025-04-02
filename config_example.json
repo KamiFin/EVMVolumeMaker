@@ -2378,6 +2378,30 @@
                     "symbol": "DAWAE"
                 }
             }
+        },
+        "solana": {
+            "name": "Solana",
+            "rpc_url": "https://api.mainnet-beta.solana.com",
+            "alternative_rpcs": [
+                "https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY",
+                "https://rpc.ankr.com/solana"
+            ],
+            "dex_type": "raydium",
+            "dex": {
+                "pool_address": "q3ULfxUXUuqU8U2YrWC3ajRRJaURvdrHX1AHdDreCnn",
+                "unit_budget": 200000,
+                "unit_price": 5000
+            },
+            "transaction": {
+                "min_buy_amount": 0.01,
+                "max_buy_amount": 0.01,
+                "transfer_percentage": 1,
+                "wait_time": 3,
+                "trade_wait_time": 4,
+                "max_retries": 3,
+                "backoff_factor": 2,
+                "min_balance_threshold": 0.001
+            }
         }
     },
     "wallets": [
@@ -2386,5 +2410,11 @@
             "private_key": "YOUR_INITIAL_WALLET_PRIVATE_KEY"
         }
        
+    ],
+    "solana_wallets": [
+        {
+            "address": "YOUR_INITIAL_WALLET_ADDRESS",
+            "private_key": "YOUR_INITIAL_WALLET_PRIVATE_KEY"
+        }
     ]
 }
