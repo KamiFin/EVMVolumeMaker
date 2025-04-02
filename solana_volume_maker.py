@@ -22,10 +22,13 @@ from solana_config import (
     TRADE_WAIT_TIME,
     MAX_RETRIES,
     BACKOFF_FACTOR,
-    MIN_BALANCE_THRESHOLD
+    MIN_BALANCE_THRESHOLD,
+    client, payer_keypair, BUY_SLIPPAGE, SELL_SLIPPAGE
 )
 from raydium.amm_v4 import buy, sell
 from solders.pubkey import Pubkey
+from utils.pool_utils import fetch_amm_v4_pool_keys, fetch_cpmm_pool_keys
+from utils.api import get_pool_info_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,9 @@ class SolanaVolumeMaker(BaseVolumeMaker):
         
         # Initialize Solana client
         self.client = self._get_connection()
+        
+        # Cache pool information
+        self._initialize_pool_info()
         
         # Set up signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -190,6 +196,36 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             logger.error(f"Error in RPC switching: {e}")
             return False
 
+    def _initialize_pool_info(self):
+        """Initialize and cache pool information"""
+        try:
+            logger.info("Initializing pool information...")
+            
+            # Fetch pool keys based on DEX type
+            if self.config.DEX_TYPE == "amm_v4":
+                self.pool_keys = fetch_amm_v4_pool_keys(self.config.POOL_ADDRESS)
+                if not self.pool_keys:
+                    raise ValueError("Failed to fetch AMM v4 pool keys")
+            elif self.config.DEX_TYPE == "cpmm":
+                self.pool_keys = fetch_cpmm_pool_keys(self.config.POOL_ADDRESS)
+                if not self.pool_keys:
+                    raise ValueError("Failed to fetch CPMM pool keys")
+            else:
+                raise ValueError(f"Unsupported DEX type: {self.config.DEX_TYPE}")
+            
+            # Fetch additional pool information from Raydium API
+            pool_info = get_pool_info_by_id(self.config.POOL_ADDRESS)
+            if "error" in pool_info:
+                logger.warning(f"Failed to fetch pool info from Raydium API: {pool_info['error']}")
+            else:
+                self.pool_info = pool_info
+            
+            logger.info("Pool information initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize pool information: {e}")
+            raise
+
     def buy_tokens(self):
         """Buy tokens using the current wallet with a random amount between min and max."""
         try:
@@ -205,12 +241,13 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             
             logger.info(f"Selected buy amount: {buy_amount} SOL")
             
-            # Execute the buy transaction
+            # Execute the buy transaction using cached pool information
             try:
                 success = buy(
                     self.config.POOL_ADDRESS,
                     buy_amount,
-                    slippage=0.05  # 5% slippage tolerance
+                    slippage=int(BUY_SLIPPAGE * 100),  # Convert decimal to percentage
+                    pool_keys=self.pool_keys  # Pass cached pool keys
                 )
                 
                 if success is True:
@@ -235,12 +272,13 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             
             logger.info(f"Selling tokens with wallet {current_wallet['address']}")
             
-            # Execute the sell transaction
+            # Execute the sell transaction using cached pool information
             try:
                 success = sell(
                     self.config.POOL_ADDRESS,
                     percentage=100,  # Sell 100% of tokens
-                    slippage=0.05  # 5% slippage tolerance
+                    slippage=int(SELL_SLIPPAGE * 100),  # Convert decimal to percentage
+                    pool_keys=self.pool_keys  # Pass cached pool keys
                 )
                 
                 if success is True:

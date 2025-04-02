@@ -2386,7 +2386,7 @@
                 "https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY",
                 "https://rpc.ankr.com/solana"
             ],
-            "dex_type": "raydium",
+            "dex_type": "amm_v4",
             "dex": {
                 "pool_address": "q3ULfxUXUuqU8U2YrWC3ajRRJaURvdrHX1AHdDreCnn",
                 "unit_budget": 200000,
@@ -2396,9 +2396,9 @@
                 "min_buy_amount": 0.01,
                 "max_buy_amount": 0.01,
                 "transfer_percentage": 1,
-                "wait_time": 3,
+                "wait_time": 2,
                 "trade_wait_time": 4,
-                "max_retries": 3,
+                "max_retries": 10,
                 "backoff_factor": 2,
                 "min_balance_threshold": 0.001
             }

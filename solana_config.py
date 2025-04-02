@@ -84,6 +84,10 @@ MAX_RETRIES = tx_config["max_retries"]
 BACKOFF_FACTOR = tx_config["backoff_factor"]
 MIN_BALANCE_THRESHOLD = tx_config["min_balance_threshold"]
 
+# Slippage settings with default of 0.5%
+BUY_SLIPPAGE = tx_config.get("buy_slippage", 0.005)
+SELL_SLIPPAGE = tx_config.get("sell_slippage", 0.005)
+
 # Initialize Solana client with the primary RPC URL
 client = Client(RPC_URL)
 
