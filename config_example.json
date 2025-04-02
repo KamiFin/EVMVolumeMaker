@@ -2396,11 +2396,13 @@
                 "min_buy_amount": 0.01,
                 "max_buy_amount": 0.01,
                 "transfer_percentage": 1,
-                "wait_time": 2,
-                "trade_wait_time": 4,
+                "wait_time": 1,
+                "trade_wait_time": 1,
                 "max_retries": 10,
                 "backoff_factor": 2,
-                "min_balance_threshold": 0.001
+                "min_balance_threshold": 0.001,
+                "buy_slippage": 0.005,
+                "sell_slippage": 0.005
             }
         }
     },
