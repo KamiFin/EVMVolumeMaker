@@ -28,7 +28,7 @@ from utils.pool_utils import (
     make_cpmm_swap_instruction, 
     get_cpmm_reserves
 )
-from config import client, payer_keypair, UNIT_BUDGET, UNIT_PRICE
+from solana_config import client, payer_keypair, UNIT_BUDGET, UNIT_PRICE
 from raydium.constants import ACCOUNT_LAYOUT_LEN, SOL_DECIMAL, TOKEN_PROGRAM_ID, WSOL
 
 def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1) -> bool:
