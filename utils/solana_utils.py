@@ -82,3 +82,4 @@ def handle_compute_unit_failure(error: Exception, attempt: int, base_price: int)
     
     # For other errors, use normal network-based price
     return get_optimal_compute_unit_price() 
+

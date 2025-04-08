@@ -120,7 +120,10 @@ class BaseVolumeMaker(ABC):
 
     def _find_wallet_with_balance(self):
         """Find a wallet with sufficient balance in the wallet list."""
-        for idx, wallet in enumerate(self.wallets):
+        # Start from the most recently created wallets (last in the list)
+        # This is more likely to find wallets with balance after transfers
+        for idx in range(len(self.wallets) - 1, -1, -1):
+            wallet = self.wallets[idx]
             balance, balance_eth = self._check_wallet_balance(wallet['address'])
             if balance > self.config.MIN_BALANCE_THRESHOLD:
                 logger.info(f"Found wallet with sufficient balance: {wallet['address']} ({balance_eth} {self.config.NATIVE_TOKEN})")

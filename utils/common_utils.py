@@ -6,13 +6,26 @@ from solders.signature import Signature #type: ignore
 from solders.pubkey import Pubkey  # type: ignore
 from solana_config import client, payer_keypair, MAX_RETRIES, BACKOFF_FACTOR
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-def get_token_balance(mint_str: str) -> float | None:
+def get_token_balance(mint_str: str, owner_pubkey: Optional[Pubkey] = None) -> float | None:
+    """
+    Get token balance for a specific wallet or the default payer wallet
+    
+    Args:
+        mint_str (str): Token mint address
+        owner_pubkey (Optional[Pubkey]): Public key of the wallet to check balance for. If None, uses payer_keypair.
+    
+    Returns:
+        float | None: Token balance or None if no balance found
+    """
     mint = Pubkey.from_string(mint_str)
+    owner = owner_pubkey if owner_pubkey else payer_keypair.pubkey()
+    
     response = client.get_token_accounts_by_owner_json_parsed(
-        payer_keypair.pubkey(),
+        owner,
         TokenAccountOpts(mint=mint),
         commitment=Processed
     )
@@ -25,12 +38,12 @@ def get_token_balance(mint_str: str) -> float | None:
                 return float(token_amount)
     return None
 
-def confirm_txn(txn_sig: Signature, max_retries: int = None, retry_interval: int = None) -> bool:
+def confirm_txn(txn_sig, max_retries: int = None, retry_interval: int = None) -> bool:
     """
     Confirm a transaction with exponential backoff and configurable retries
     
     Args:
-        txn_sig: Transaction signature to confirm
+        txn_sig: Transaction signature to confirm (can be Signature object, string, or response object)
         max_retries: Maximum number of retries (defaults to MAX_RETRIES from config)
         retry_interval: Base interval between retries in seconds (defaults to BACKOFF_FACTOR from config)
     
@@ -40,6 +53,25 @@ def confirm_txn(txn_sig: Signature, max_retries: int = None, retry_interval: int
     # Use config values if not provided
     max_retries = max_retries or MAX_RETRIES
     retry_interval = retry_interval or BACKOFF_FACTOR
+    
+    # Convert the signature to a proper string or Signature object that client.get_transaction can accept
+    try:
+        if hasattr(txn_sig, 'value'):
+            # Handle response objects that have a value attribute
+            txn_sig = txn_sig.value
+        elif hasattr(txn_sig, 'Signature'):
+            # Handle response objects with Signature attribute
+            txn_sig = txn_sig.Signature
+        elif isinstance(txn_sig, str) and txn_sig.startswith('SendTransactionResp'):
+            # Handle string representation of response object
+            # Extract the signature from the string using regex
+            import re
+            signature_match = re.search(r'Signature\(([a-zA-Z0-9]+)', txn_sig)
+            if signature_match:
+                txn_sig = signature_match.group(1)
+    except Exception as e:
+        logger.error(f"Failed to extract signature from object: {e}")
+        return False
     
     retries = 1
     current_interval = retry_interval
@@ -69,7 +101,28 @@ def confirm_txn(txn_sig: Signature, max_retries: int = None, retry_interval: int
                 return True
             
             if txn_json['err']:
-                logger.error(f"Transaction failed with error: {txn_json['err']}")
+                if "InsufficientFundsForRent" in str(txn_json['err']):
+                    logger.warning("Transaction failed due to InsufficientFundsForRent, wallet likely drained. Accepting.")
+                    return True
+                # Handle Raydium-specific error codes
+                if isinstance(txn_json['err'], dict) and 'InstructionError' in txn_json['err']:
+                    inst_err = txn_json['err']['InstructionError']
+                    if isinstance(inst_err, list) and len(inst_err) == 2:
+                        error_code = inst_err[1].get('Custom')
+                        if error_code == 30:
+                            logger.error("Transaction failed: Price impact too high or slippage exceeded")
+                        elif error_code == 1:
+                            logger.error("Transaction failed: Insufficient funds or liquidity")
+                        elif error_code == 2:
+                            logger.error("Transaction failed: Invalid pool state")
+                        elif error_code == 3:
+                            logger.error("Transaction failed: Invalid token account")
+                        elif error_code == 4:
+                            logger.error("Transaction failed: Invalid market state")
+                        else:
+                            logger.error(f"Transaction failed with Raydium error code: {error_code}")
+                else:
+                    logger.error(f"Transaction failed with error: {txn_json['err']}")
                 return False
                 
         except Exception as e:

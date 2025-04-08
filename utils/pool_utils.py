@@ -271,21 +271,32 @@ def get_amm_v4_reserves(pool_keys: AmmV4PoolKeys) -> tuple:
         quote_account = balances[0]
         base_account = balances[1]
         
-        quote_account_balance = quote_account.data.parsed['info']['tokenAmount']['uiAmount']
-        base_account_balance = base_account.data.parsed['info']['tokenAmount']['uiAmount']
+        # Get raw amounts and convert using proper decimals
+        quote_raw_amount = int(quote_account.data.parsed['info']['tokenAmount']['amount'])
+        base_raw_amount = int(base_account.data.parsed['info']['tokenAmount']['amount'])
+        
+        # Log raw values for debugging
+        print(f"Raw Quote Amount: {quote_raw_amount} | Quote Decimals: {quote_decimal}")
+        print(f"Raw Base Amount: {base_raw_amount} | Base Decimals: {base_decimal}")
+        
+        quote_account_balance = quote_raw_amount / (10 ** quote_decimal)
+        base_account_balance = base_raw_amount / (10 ** base_decimal)
         
         if quote_account_balance is None or base_account_balance is None:
             print("Error: One of the account balances is None.")
             return None, None, None
         
+        # For WSOL pairs, we need to swap the reserves
         if base_mint == WSOL:
-            base_reserve = quote_account_balance  
-            quote_reserve = base_account_balance  
-            token_decimal = quote_decimal 
+            # When base is WSOL, the quote vault contains the token and base vault contains WSOL
+            base_reserve = base_account_balance  # WSOL amount
+            quote_reserve = quote_account_balance  # Token amount
+            token_decimal = base_decimal  # Use WSOL decimals
         else:
-            base_reserve = base_account_balance  
-            quote_reserve = quote_account_balance
-            token_decimal = base_decimal
+            # Normal case: base vault contains token, quote vault contains WSOL
+            base_reserve = base_account_balance  # Token amount
+            quote_reserve = quote_account_balance  # WSOL amount
+            token_decimal = base_decimal  # Use token decimals
 
         print(f"Base Mint: {base_mint} | Quote Mint: {quote_mint}")
         print(f"Base Reserve: {base_reserve} | Quote Reserve: {quote_reserve} | Token Decimal: {token_decimal}")

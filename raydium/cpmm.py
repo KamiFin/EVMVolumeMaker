@@ -32,12 +32,16 @@ from utils.pool_utils import (
 from solana_config import client, payer_keypair, UNIT_BUDGET, UNIT_PRICE, MAX_RETRIES, BACKOFF_FACTOR
 from raydium.constants import ACCOUNT_LAYOUT_LEN, SOL_DECIMAL, TOKEN_PROGRAM_ID, WSOL
 import logging
+from solders.keypair import Keypair
 
 logger = logging.getLogger(__name__)
 
-def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Optional[CpmmPoolKeys] = None) -> bool:
+def buy(private_key: str, pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Optional[CpmmPoolKeys] = None) -> bool:
     try:
         logger.info(f"Starting buy transaction for pair address: {pair_address}")
+
+        # Create keypair from private key
+        keypair = Keypair.from_base58_string(private_key)
 
         # Use cached pool keys if provided, otherwise fetch them
         if pool_keys is None:
@@ -65,27 +69,27 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
         logger.info(f"Amount In: {amount_in} | Minimum Amount Out: {minimum_amount_out}")
 
         logger.info("Checking for existing token account...")
-        token_account_check = client.get_token_accounts_by_owner(payer_keypair.pubkey(), TokenAccountOpts(mint), Processed)
+        token_account_check = client.get_token_accounts_by_owner(keypair.pubkey(), TokenAccountOpts(mint), Processed)
         if token_account_check.value:
             token_account = token_account_check.value[0].pubkey
             create_token_account_instruction = None
             logger.info("Token account found.")
         else:
-            token_account = get_associated_token_address(payer_keypair.pubkey(), mint)
-            create_token_account_instruction = create_associated_token_account(payer_keypair.pubkey(), payer_keypair.pubkey(), mint)
+            token_account = get_associated_token_address(keypair.pubkey(), mint)
+            create_token_account_instruction = create_associated_token_account(keypair.pubkey(), keypair.pubkey(), mint)
             logger.info("No existing token account found; creating associated token account.")
 
         logger.info("Generating seed for WSOL account...")
         seed = base64.urlsafe_b64encode(os.urandom(24)).decode("utf-8")
-        wsol_token_account = Pubkey.create_with_seed(payer_keypair.pubkey(), seed, TOKEN_PROGRAM_ID)
+        wsol_token_account = Pubkey.create_with_seed(keypair.pubkey(), seed, TOKEN_PROGRAM_ID)
         balance_needed = Token.get_min_balance_rent_for_exempt_for_account(client)
 
         logger.info("Creating and initializing WSOL account...")
         create_wsol_account_instruction = create_account_with_seed(
             CreateAccountWithSeedParams(
-                from_pubkey=payer_keypair.pubkey(),
+                from_pubkey=keypair.pubkey(),
                 to_pubkey=wsol_token_account,
-                base=payer_keypair.pubkey(),
+                base=keypair.pubkey(),
                 seed=seed,
                 lamports=int(balance_needed + amount_in),
                 space=ACCOUNT_LAYOUT_LEN,
@@ -98,7 +102,7 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
                 program_id=TOKEN_PROGRAM_ID,
                 account=wsol_token_account,
                 mint=WSOL,
-                owner=payer_keypair.pubkey(),
+                owner=keypair.pubkey(),
             )
         )
 
@@ -109,7 +113,8 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
             token_account_in=wsol_token_account,
             token_account_out=token_account,
             accounts=pool_keys,
-            owner=payer_keypair.pubkey(),
+            owner=keypair.pubkey(),
+            action=DIRECTION.BUY
         )
 
         logger.info("Preparing to close WSOL account after swap...")
@@ -117,8 +122,8 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
             CloseAccountParams(
                 program_id=TOKEN_PROGRAM_ID,
                 account=wsol_token_account,
-                dest=payer_keypair.pubkey(),
-                owner=payer_keypair.pubkey(),
+                dest=keypair.pubkey(),
+                owner=keypair.pubkey(),
             )
         )
 
@@ -140,7 +145,7 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
 
         logger.info("Compiling transaction message...")
         compiled_message = MessageV0.try_compile(
-            payer_keypair.pubkey(),
+            keypair.pubkey(),
             instructions,
             [],
             client.get_latest_blockhash().value.blockhash,
@@ -148,13 +153,13 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
 
         logger.info("Sending transaction...")
         attempt = 1
-        max_attempts = 3  # Maximum number of retry attempts for compute unit failures
+        max_attempts = MAX_RETRIES
         
         while attempt <= max_attempts:
             try:
                 txn_sig = client.send_transaction(
-                    txn=VersionedTransaction(compiled_message, [payer_keypair]),
-                    opts=TxOpts(skip_preflight=True),
+                    txn=VersionedTransaction(compiled_message, [keypair]),
+                    opts=TxOpts(skip_preflight=False),
                 ).value
                 logger.info(f"Transaction Signature: {txn_sig}")
                 break  # If successful, exit the retry loop
@@ -172,7 +177,7 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
                     
                     # Recompile message with new instructions
                     compiled_message = MessageV0.try_compile(
-                        payer_keypair.pubkey(),
+                        keypair.pubkey(),
                         instructions,
                         [],
                         client.get_latest_blockhash().value.blockhash,
@@ -208,12 +213,15 @@ def buy(pair_address: str, sol_in: float = 0.1, slippage: int = 1, pool_keys: Op
         return False
 
 
-def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys: Optional[CpmmPoolKeys] = None) -> bool:
+def sell(private_key: str, pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys: Optional[CpmmPoolKeys] = None) -> bool:
     try:
         logger.info(f"Starting sell transaction for pair address: {pair_address}")
         if not (1 <= percentage <= 100):
             logger.error("Percentage must be between 1 and 100.")
             return False
+
+        # Create keypair from private key
+        keypair = Keypair.from_base58_string(private_key)
 
         # Use cached pool keys if provided, otherwise fetch them
         if pool_keys is None:
@@ -229,7 +237,7 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
         mint = (pool_keys.base_mint if pool_keys.base_mint != WSOL else pool_keys.quote_mint)
 
         logger.info("Retrieving token balance...")
-        token_balance = get_token_balance(str(mint))
+        token_balance = get_token_balance(str(mint), keypair.pubkey())
         logger.info(f"Token Balance: {token_balance}")
 
         if token_balance == 0 or token_balance is None:
@@ -250,18 +258,18 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
 
         amount_in = int(token_balance * 10**token_decimal)
         logger.info(f"Amount In: {amount_in} | Minimum Amount Out: {minimum_amount_out}")
-        token_account = get_associated_token_address(payer_keypair.pubkey(), mint)
+        token_account = get_associated_token_address(keypair.pubkey(), mint)
 
         logger.info("Generating seed and creating WSOL account...")
         seed = base64.urlsafe_b64encode(os.urandom(24)).decode("utf-8")
-        wsol_token_account = Pubkey.create_with_seed(payer_keypair.pubkey(), seed, TOKEN_PROGRAM_ID)
+        wsol_token_account = Pubkey.create_with_seed(keypair.pubkey(), seed, TOKEN_PROGRAM_ID)
         balance_needed = Token.get_min_balance_rent_for_exempt_for_account(client)
 
         create_wsol_account_instruction = create_account_with_seed(
             CreateAccountWithSeedParams(
-                from_pubkey=payer_keypair.pubkey(),
+                from_pubkey=keypair.pubkey(),
                 to_pubkey=wsol_token_account,
-                base=payer_keypair.pubkey(),
+                base=keypair.pubkey(),
                 seed=seed,
                 lamports=int(balance_needed),
                 space=ACCOUNT_LAYOUT_LEN,
@@ -274,7 +282,7 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
                 program_id=TOKEN_PROGRAM_ID,
                 account=wsol_token_account,
                 mint=WSOL,
-                owner=payer_keypair.pubkey(),
+                owner=keypair.pubkey(),
             )
         )
 
@@ -285,7 +293,8 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
             token_account_in=token_account,
             token_account_out=wsol_token_account,
             accounts=pool_keys,
-            owner=payer_keypair.pubkey(),
+            owner=keypair.pubkey(),
+            action=DIRECTION.SELL
         )
 
         logger.info("Preparing to close WSOL account after swap...")
@@ -293,8 +302,8 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
             CloseAccountParams(
                 program_id=TOKEN_PROGRAM_ID,
                 account=wsol_token_account,
-                dest=payer_keypair.pubkey(),
-                owner=payer_keypair.pubkey(),
+                dest=keypair.pubkey(),
+                owner=keypair.pubkey(),
             )
         )
 
@@ -316,15 +325,15 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
                 CloseAccountParams(
                     program_id=TOKEN_PROGRAM_ID,
                     account=token_account,
-                    dest=payer_keypair.pubkey(),
-                    owner=payer_keypair.pubkey(),
+                    dest=keypair.pubkey(),
+                    owner=keypair.pubkey(),
                 )
             )
             instructions.append(close_token_account_instruction)
 
         logger.info("Compiling transaction message...")
         compiled_message = MessageV0.try_compile(
-            payer_keypair.pubkey(),
+            keypair.pubkey(),
             instructions,
             [],
             client.get_latest_blockhash().value.blockhash,
@@ -332,13 +341,13 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
 
         logger.info("Sending transaction...")
         attempt = 1
-        max_attempts = 3  # Maximum number of retry attempts for compute unit failures
+        max_attempts = MAX_RETRIES
         
         while attempt <= max_attempts:
             try:
                 txn_sig = client.send_transaction(
-                    txn=VersionedTransaction(compiled_message, [payer_keypair]),
-                    opts=TxOpts(skip_preflight=True),
+                    txn=VersionedTransaction(compiled_message, [keypair]),
+                    opts=TxOpts(skip_preflight=False),
                 ).value
                 logger.info(f"Transaction Signature: {txn_sig}")
                 break  # If successful, exit the retry loop
@@ -356,7 +365,7 @@ def sell(pair_address: str, percentage: int = 100, slippage: int = 1, pool_keys:
                     
                     # Recompile message with new instructions
                     compiled_message = MessageV0.try_compile(
-                        payer_keypair.pubkey(),
+                        keypair.pubkey(),
                         instructions,
                         [],
                         client.get_latest_blockhash().value.blockhash,

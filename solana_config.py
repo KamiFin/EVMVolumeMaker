@@ -88,6 +88,8 @@ MIN_BALANCE_THRESHOLD = tx_config["min_balance_threshold"]
 BUY_SLIPPAGE = tx_config.get("buy_slippage", 0.005)
 SELL_SLIPPAGE = tx_config.get("sell_slippage", 0.005)
 
+SOL_DECIMAL = 9
+
 # Initialize Solana client with the primary RPC URL
 client = Client(RPC_URL)
 

@@ -2393,16 +2393,16 @@
                 "unit_price": 5000
             },
             "transaction": {
-                "min_buy_amount": 0.01,
-                "max_buy_amount": 0.01,
+                "min_buy_amount": 0.0000001,
+                "max_buy_amount": 0.0000001,
                 "transfer_percentage": 1,
                 "wait_time": 1,
-                "trade_wait_time": 1,
+                "trade_wait_time": 3,
                 "max_retries": 10,
                 "backoff_factor": 2,
                 "min_balance_threshold": 0.001,
-                "buy_slippage": 0.005,
-                "sell_slippage": 0.005
+                "buy_slippage": 0.001,
+                "sell_slippage": 0.001
             }
         }
     },
