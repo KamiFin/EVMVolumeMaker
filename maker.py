@@ -152,20 +152,41 @@ if __name__ == "__main__":
         # Set up argument parser
         parser = argparse.ArgumentParser(description='Volume maker for DEX trading')
         parser.add_argument('chain', help='Chain name from config (e.g., sonic, ethereum, solana)')
-        parser.add_argument('--mode', choices=['buy', 'sell', 'trade'], default='buy', 
-                          help='Operation mode: buy tokens, sell tokens, or buy then sell (default: buy)')
+        parser.add_argument('--mode', choices=['buy', 'sell', 'trade', 'batch'], default='buy', 
+                          help='Operation mode: buy tokens, sell tokens, buy then sell, or batch mode (default: buy)')
         parser.add_argument('--single-wallet', '-s', action='store_true',
                           help='Use only the first wallet without creating new ones')
+        parser.add_argument('--wallet-count', type=int, default=5,
+                          help='Number of wallets to create in batch mode (default: 5)')
+        parser.add_argument('--amount-per-wallet', type=float, default=0.01,
+                          help='Amount to send to each wallet in batch mode (default: 0.01)')
         args = parser.parse_args()
 
         # Select the appropriate volume maker based on chain
         if args.chain.lower() == "solana":
-            maker = SolanaVolumeMaker(args.chain, args.mode, args.single_wallet)
+            maker = SolanaVolumeMaker(args.chain, args.mode if args.mode != 'batch' else 'buy', args.single_wallet)
+            
+            # Handle batch mode separately
+            if args.mode == 'batch':
+                logger.info(f"Starting batch mode with {args.wallet_count} wallets and {args.amount_per_wallet} SOL per wallet")
+                success = maker.batch_mode(args.wallet_count, args.amount_per_wallet)
+                if success:
+                    logger.info("Batch mode completed successfully")
+                    sys.exit(0)
+                else:
+                    logger.error("Batch mode failed")
+                    sys.exit(1)
+            else:
+                # Run the volume maker in normal mode
+                maker.run()
         else:
+            # For EVM chains, batch mode is not supported yet
+            if args.mode == 'batch':
+                logger.error("Batch mode is only supported for Solana chain")
+                sys.exit(1)
+                
             maker = EVMVolumeMaker(args.chain, args.mode, args.single_wallet)
-
-        # Run the volume maker
-        maker.run()
+            maker.run()
 
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
