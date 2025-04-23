@@ -1807,7 +1807,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 if os.path.exists("batch_mode_in_progress.flag"):
                     os.remove("batch_mode_in_progress.flag")
                     logger.info("Removed batch mode in-progress flag")
-            except Exception as e:
+                        except Exception as e:
                 logger.warning(f"Failed to remove batch mode in-progress flag: {e}")
             
             if buy_success_count == 0 and len(failed_wallets) == len(buy_tasks):
@@ -1816,11 +1816,11 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 
             return True
                 
-        except Exception as e:
+            except Exception as e:
             logger.error(f"Error in batch mode: {e}")
             logger.error(traceback.format_exc())
-            return False
-        
+                return False
+                
     def _save_failed_wallets_for_recovery(self, failed_wallets):
         """
         Save failed wallet information to a recovery file.
@@ -1902,12 +1902,12 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                             success = self._batch_multi_sig_buy(wallet_index, swap_amount)
                         else:
                             success = self._batch_buy_tokens(wallet_index, swap_amount)
-                        
-                        if success:
+                
+                if success:
                             logger.info(f"Successfully recovered wallet {wallet_index}: {wallet_address}")
                             recovered_count += 1
                             break
-                        else:
+                else:
                             logger.warning(f"Failed to recover wallet {wallet_index} (attempt {attempt+1}/{max_retries})")
                     except Exception as e:
                         logger.error(f"Error in recovery attempt {attempt+1} for wallet {wallet_index}: {e}")
@@ -1922,10 +1922,10 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                     logger.info("Removed failed wallets recovery file as all wallets were recovered")
                 except Exception as e:
                     logger.warning(f"Failed to remove recovery file: {e}")
-                    
+            
         except Exception as e:
             logger.error(f"Error in recovery process: {e}")
-            logger.error(traceback.format_exc())    
+            logger.error(traceback.format_exc())
 
     def cyclic_batch_mode(self, total_wallet_count=20, wallets_per_cycle=5, amount_per_wallet=0.001, use_multi_sig=True, swap_amount=None, max_cycle_retries=1):
         """
@@ -2048,7 +2048,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
         return stats
 
     def infinite_batch_mode(self, wallets_per_cycle=5, amount_per_wallet=0.001, use_multi_sig=True, swap_amount=None, 
-                            max_cycle_retries=1, max_runtime_hours=None, target_tx_count=None, pause_between_cycles=3):
+                        max_cycle_retries=1, max_runtime_hours=None, target_tx_count=None, pause_between_cycles=3):
         """
         Run batch mode in an infinite loop until stopped by the user, max runtime reached, or target transactions completed.
         

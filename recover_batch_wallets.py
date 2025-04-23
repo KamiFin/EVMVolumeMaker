@@ -6,16 +6,19 @@ This script is used to recover funds from batch wallets if the program
 was interrupted during batch mode operation.
 
 Usage:
-    python recover_batch_wallets.py [--use-multisig] [--swap-amount AMOUNT]
+    python recover_batch_wallets.py [--use-multisig] [--swap-amount AMOUNT] [--file FILE]
 
 Options:
     --use-multisig     Use multi-signature buy/sell method for recovery (recommended)
     --swap-amount      Specific amount of SOL to use for swap (default: 0.00001)
+    --file             Recovery file to use. Options:
+                       'batch' - Use batch_wallets_recovery.json (default)
+                       'failed' - Use failed_batch_wallets.json
 
-Requirements:
-    - A batch_wallets_recovery.json file must exist in the current directory
-    - This file is automatically created during batch mode operations
-    
+Recovery Files:
+    - batch_wallets_recovery.json: Contains wallets from the last batch mode run
+    - failed_batch_wallets.json: Contains all batch wallets that have failed
+
 Recovery Methods:
     1. Standard Recovery:
        - Each batch wallet sells tokens individually
@@ -59,6 +62,8 @@ def parse_args():
                         help="Use multi-signature buy/sell method for recovery (recommended)")
     parser.add_argument("--swap-amount", type=float, default=0.00001,
                         help="Specific amount of SOL to use for swap (default: 0.00001)")
+    parser.add_argument("--file", type=str, choices=['batch', 'failed'], default='batch',
+                        help="Recovery file to use: 'batch' for batch_wallets_recovery.json or 'failed' for failed_batch_wallets.json")
     return parser.parse_args()
 
 def main():
@@ -67,7 +72,7 @@ def main():
     
     This function:
     1. Parses command line arguments
-    2. Loads wallet data from batch_wallets_recovery.json
+    2. Loads wallet data from the selected recovery file
     3. Initializes the SolanaVolumeMaker
     4. Executes the recovery process based on the selected mode
     5. Reports success/failure
@@ -81,6 +86,14 @@ def main():
     use_multisig = args.use_multisig
     swap_amount = args.swap_amount
     
+    # Determine which recovery file to use based on the --file argument
+    if args.file == 'batch':
+        recovery_file = "batch_wallets_recovery.json"
+        file_desc = "last batch mode run"
+    else:  # args.file == 'failed'
+        recovery_file = "failed_batch_wallets.json"
+        file_desc = "all failed batch operations"
+    
     try:
         # Banner - Display script information
         print("\n" + "="*60)
@@ -90,13 +103,12 @@ def main():
         print("if the program was interrupted during batch mode operation.\n")
         
         # Check if the recovery file exists
-        # The batch_wallets_recovery.json file is created during batch operations
-        # and contains private keys for all generated batch wallets
-        recovery_file = "batch_wallets_recovery.json"
         if not os.path.exists(recovery_file):
             print(f"ERROR: {recovery_file} not found. Cannot proceed with recovery.")
             logger.error(f"{recovery_file} file not found")
             return False
+        
+        print(f"Using recovery file: {recovery_file} (contains wallets from {file_desc})")
         
         # Recovery mode explanation - describe the selected recovery method
         if use_multisig:
@@ -130,12 +142,20 @@ def main():
         with open(recovery_file, 'r') as f:
             recovery_data = json.load(f)
             
-        if 'batch_wallets' not in recovery_data or not recovery_data['batch_wallets']:
-            print("ERROR: No batch wallets found in recovery file.")
-            logger.error("No batch wallets found in recovery file")
-            return False
+        # Different recovery files have different structures
+        if args.file == 'batch':
+            if 'batch_wallets' not in recovery_data or not recovery_data['batch_wallets']:
+                print("ERROR: No batch wallets found in recovery file.")
+                logger.error("No batch wallets found in recovery file")
+                return False
+            batch_wallets = recovery_data['batch_wallets']
+        else:  # args.file == 'failed'
+            if not recovery_data:
+                print("ERROR: No failed batch wallets found in recovery file.")
+                logger.error("No failed batch wallets found in recovery file")
+                return False
+            batch_wallets = recovery_data
             
-        batch_wallets = recovery_data['batch_wallets']
         print(f"\nFound {len(batch_wallets)} batch wallets in recovery file.")
         
         # Set the batch wallets in the maker object
@@ -196,7 +216,12 @@ def main():
             # 3. Transfers remaining SOL back to main wallet
             logger.info("Using standard mode for recovery")
             print("Using standard recovery process...")
-            success = maker.recover_batch_wallets()
+            
+            # Check if we're using the built-in recovery or need to pass failed wallets
+            if args.file == 'batch':
+                success = maker.recover_batch_wallets()
+            else:  # args.file == 'failed'
+                success = maker._recover_failed_batch_wallets(batch_wallets, use_multi_sig=False, swap_amount=swap_amount)
         
         # Cleanup - rename the recovery file once processed to prevent re-use
         if success:

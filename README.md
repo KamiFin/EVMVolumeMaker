@@ -297,4 +297,89 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Disclaimer
 
-This software is for educational purposes only. Use at your own risk. Always verify transactions and configurations before executing operations with real assets. 
+This software is for educational purposes only. Use at your own risk. Always verify transactions and configurations before executing operations with real assets.
+
+## Solana Volume Maker
+
+### Features
+
+- Multi-signature transactions that mimic professional trading operations
+- Batch wallet operations for efficient volume generation
+- Optimized RPC call patterns to minimize network load
+- Asynchronous processing for increased throughput
+- Automatic recovery of failed transactions
+- Persistent recovery file for manual intervention if needed
+
+### Modes
+
+The Solana Volume Maker supports several operating modes:
+
+#### Standard Batch Mode
+
+```bash
+python example_batch_mode.py --wallet-count 5 --amount-per-wallet 0.001
+```
+
+#### Multi-Signature Batch Mode (Recommended)
+
+```bash
+python example_batch_mode.py --wallet-count 5 --amount-per-wallet 0.001 --multi-sig --swap-amount 0.00001
+```
+
+#### Cyclic Batch Mode
+
+```bash
+python example_cyclic_batch_mode.py --total-wallets 20 --wallets-per-cycle 5 --amount-per-wallet 0.001 --multi-sig
+```
+
+#### Infinite Batch Mode
+
+```bash
+python example_infinite_batch_mode.py --wallets-per-cycle 5 --amount-per-wallet 0.001 --multi-sig
+```
+
+### Optimizations
+
+The Solana Volume Maker has been optimized to:
+
+1. **Reduce RPC Calls**: Minimizes unnecessary RPC calls, especially during batch operations
+2. **Trust Transaction Confirmations**: Once a funding transaction is confirmed, wallets are marked as funded without additional verification
+3. **Asynchronous Processing**: Uses thread pools for parallel transaction processing
+4. **Non-Blocking Recovery**: Background thread handles failed wallet recovery without blocking the main process
+5. **Persistent Recovery**: Saves failed wallet information to a JSON file for manual recovery if needed
+
+### Recovery Mechanism
+
+The Solana Volume Maker includes an advanced recovery system:
+
+1. **Automatic Background Recovery**: Failed transactions are automatically retried in a background thread
+2. **Multiple Retry Attempts**: Each failed wallet gets multiple recovery attempts with increasing delays
+3. **Persistent Recovery File**: Failed wallet details are saved to `failed_batch_wallets.json` for manual recovery
+4. **Manual Recovery Tool**: Run `python recover_batch_wallets.py --use-multisig` to recover any wallets that couldn't be automatically recovered
+
+### Troubleshooting
+
+#### RPC Issues
+
+If you encounter RPC connection problems or slow responses:
+
+```bash
+# Try using alternative RPCs
+python example_batch_mode.py --wallet-count 5 --multi-sig --alternative-rpc https://your-alternative-rpc.com
+```
+
+#### Failed Transactions
+
+If some batch wallets fail to complete transactions:
+
+1. Check the `failed_batch_wallets.json` file to see which wallets still have funds
+2. Run the recovery script: `python recover_batch_wallets.py --use-multisig`
+3. For stubborn wallets, try increasing the swap amount: `python recover_batch_wallets.py --use-multisig --swap-amount 0.0001`
+
+### Best Practices
+
+1. Always use the `--multi-sig` flag for more reliable operations
+2. Keep individual transaction amounts small (`--swap-amount 0.00001` is recommended)
+3. Monitor the logs for any failed transactions
+4. Always check the recovery file after batch operations complete
+5. For large batch operations, use the cyclic batch mode to manage wallet count 

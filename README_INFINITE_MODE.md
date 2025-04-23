@@ -14,6 +14,31 @@ This mode is useful for:
 - Long-running operations to build trading volume
 - Automated liquidity generation on DEXes
 
+## Performance Optimizations
+
+The Solana Volume Maker has been significantly optimized to:
+
+1. **Reduce RPC Calls**: Eliminates unnecessary RPC balance checks and transaction verifications
+2. **Trust Transaction Confirmations**: Wallets are marked as funded based on transaction confirmation
+3. **Asynchronous Processing**: Utilizes thread pools for parallel transaction processing
+4. **Non-Blocking Recovery**: Failed transactions are recovered in a background thread
+5. **Persistent Failure Tracking**: Failed wallets are saved to a recovery file for resilience
+
+These optimizations result in:
+- Faster transaction processing
+- Reduced network load
+- Higher success rates
+- Better resilience to RPC issues
+
+## Automatic Recovery
+
+The infinite batch mode now includes an enhanced recovery system:
+
+1. **Background Recovery**: Failed transactions are automatically retried in a background thread
+2. **Multiple Retry Attempts**: Each failed wallet gets up to 3 recovery attempts with increasing delays
+3. **Recovery File**: Failed wallet details are saved to `failed_batch_wallets.json` for manual recovery
+4. **Continuous Operation**: The main process continues with new cycles while recovery happens in parallel
+
 ## Usage
 
 ### Running the Example Script
@@ -99,6 +124,8 @@ The infinite batch mode includes several safety features:
 - Exception handling with error logging
 - Pause between cycles to prevent rate limiting
 - Retry mechanism for failed cycles
+- Automatic background recovery of failed transactions
+- Failed wallet persistence for manual recovery
 
 ## Integration with Other Scripts
 
@@ -129,5 +156,23 @@ If you encounter issues:
 2. Ensure you have sufficient SOL in your accounts
 3. Try increasing the pause between cycles if you hit rate limits
 4. Check if any stop flag files exist in the directory
-5. Verify network connectivity to Solana RPC nodes
-6. Make sure your token address is correct if you specified a custom one 
+5. Verify network connectivity to Solana RPC nodes 
+6. Make sure your token address is correct if you specified a custom one
+7. Check for a `failed_batch_wallets.json` file and run the recovery script if needed:
+   ```bash
+   python recover_batch_wallets.py --use-multisig
+   ```
+8. For persistent RPC issues, try specifying an alternative RPC:
+   ```bash
+   python example_infinite_batch_mode.py --alternative-rpc https://your-alternative-rpc.com
+   ```
+
+## Advanced Tip: Handling High Volume
+
+For high-volume operations:
+
+1. Use a small `--swap-amount` value (e.g., 0.00001 SOL) to minimize transaction impact
+2. Use multi-signature mode (`--multi-sig` flag) for better transaction success rates
+3. Increase `--pause` between cycles to 30-60 seconds for extended runs
+4. Monitor the `failed_batch_wallets.json` file periodically
+5. Run the recovery script after completion to ensure all funds are recovered 
