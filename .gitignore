@@ -34,3 +34,18 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Batch wallet recovery files
+batch_wallets_recovery.json
+batch_recovery.log
+batch_mode_in_progress.flag
+infinite_mode_running.flag
+failed_batch_wallets.json
+
+# Flags file
+*.flag
+
+# Temporary files
+*.tmp
+*.tmp.*
+
