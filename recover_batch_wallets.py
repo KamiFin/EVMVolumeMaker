@@ -38,6 +38,7 @@ import sys
 import json
 import os
 from solana_volume_maker import SolanaVolumeMaker
+from solders.pubkey import Pubkey as SoldersPubkey
 
 # Configure logging
 logging.basicConfig(
@@ -185,6 +186,28 @@ def main():
                 logger.info(f"Processing batch wallet {i}: {wallet['address']} with multi-sig")
                 
                 try:
+                    # Check wallet balance first to avoid wasting time on empty wallets
+                    address = wallet["address"]
+                    pubkey = SoldersPubkey.from_string(address)
+                    balance_lamports = maker.client.get_balance(pubkey).value
+                    balance_sol = balance_lamports / 1e9
+                    
+                    # Skip wallets with no or extremely low balance
+                    if balance_lamports < 1000:  # Less than 0.000001 SOL (1000 lamports)
+                        print(f"⚠ Skipping wallet with no balance: {address} ({balance_sol} SOL)")
+                        logger.info(f"Skipping wallet with no balance: {address} ({balance_sol} SOL)")
+                        # Track skipped wallets
+                        failed_wallets_info.append({
+                            "address": wallet["address"],
+                            "private_key": wallet["private_key"],
+                            "reason": f"No balance - only {balance_sol} SOL"
+                        })
+                        continue
+                    
+                    # Balance is sufficient, proceed with recovery
+                    print(f"Wallet has balance: {balance_sol} SOL - attempting recovery...")
+                    logger.info(f"Wallet has balance: {balance_sol} SOL - attempting recovery...")
+                    
                     # Prepare parameters for multi-signature buy
                     # Create a temporary index entry in batch_wallets
                     tmp_index = len(maker.batch_wallets)
@@ -259,26 +282,72 @@ def main():
             else:  # args.file == 'failed'
                 # Convert wallet list to the format expected by _recover_failed_batch_wallets
                 failed_wallets_list = []
+                skipped_wallets = []
+                
+                # First check balances for all wallets
+                print(f"\nChecking balances for {len(batch_wallets)} wallets...")
                 for i, wallet in enumerate(batch_wallets):
-                    # Each wallet entry needs wallet_index, address, and amount
-                    failed_wallets_list.append({
-                        "wallet_index": i,
-                        "address": wallet["address"],
-                        "amount": wallet.get("amount", swap_amount)
-                    })
+                    try:
+                        # Check wallet balance
+                        address = wallet["address"]
+                        pubkey = SoldersPubkey.from_string(address)
+                        balance_lamports = maker.client.get_balance(pubkey).value
+                        balance_sol = balance_lamports / 1e9
+                        
+                        # Skip wallets with no or extremely low balance
+                        if balance_lamports < 1000:  # Less than 0.000001 SOL (1000 lamports)
+                            print(f"⚠ Skipping wallet {i+1}: {address} (no balance - {balance_sol} SOL)")
+                            logger.info(f"Skipping wallet with no balance: {address} ({balance_sol} SOL)")
+                            skipped_wallets.append({
+                                "address": wallet["address"],
+                                "private_key": wallet["private_key"],
+                                "reason": f"No balance - only {balance_sol} SOL"
+                            })
+                            continue
+                        
+                        # Balance is sufficient, add to recovery list
+                        print(f"Wallet {i+1}: {address} has balance: {balance_sol} SOL - adding to recovery list")
+                        logger.info(f"Wallet has balance: {balance_sol} SOL - adding to recovery list")
+                        failed_wallets_list.append({
+                            "wallet_index": i,
+                            "address": wallet["address"],
+                            "amount": wallet.get("amount", swap_amount)
+                        })
+                    except Exception as e:
+                        logger.error(f"Error checking balance for wallet {i}: {str(e)}")
+                        print(f"⚠ Error checking balance for wallet {i+1}: {str(e)}")
                 
-                # Add wallets to maker.batch_wallets
-                maker.batch_wallets = batch_wallets
-                
-                # Call recovery with properly formatted wallet list
-                recovered_count, recovery_attempted, recovery_success_rate = maker._recover_failed_batch_wallets(
-                    failed_wallets_list, 
-                    use_multi_sig=True, 
-                    swap_amount=swap_amount
-                )
-                
-                success = recovered_count > 0
-                print(f"\nRecovered {recovered_count}/{recovery_attempted} wallets ({recovery_success_rate:.2f}% success rate)")
+                # Add wallets to maker.batch_wallets (only if there are wallets to recover)
+                if failed_wallets_list:
+                    print(f"\nAttempting to recover {len(failed_wallets_list)} wallets with balance...")
+                    maker.batch_wallets = batch_wallets
+                    
+                    # Call recovery with properly formatted wallet list
+                    recovered_count, recovery_attempted, recovery_success_rate = maker._recover_failed_batch_wallets(
+                        failed_wallets_list, 
+                        use_multi_sig=True, 
+                        swap_amount=swap_amount
+                    )
+                    
+                    success = recovered_count > 0
+                    print(f"\nRecovered {recovered_count}/{recovery_attempted} wallets ({recovery_success_rate:.2f}% success rate)")
+                else:
+                    print("\nNo wallets with balance found to recover.")
+                    if skipped_wallets:
+                        # Save skipped wallets to a file
+                        import time
+                        timestamp = time.strftime("%Y%m%d-%H%M%S")
+                        skipped_file = f"skipped_zero_balance_wallets_{timestamp}.json"
+                        with open(skipped_file, 'w') as f:
+                            json.dump({
+                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "wallets": skipped_wallets
+                            }, f, indent=2)
+                        print(f"Saved {len(skipped_wallets)} zero-balance wallets to {skipped_file}")
+                        logger.info(f"Saved {len(skipped_wallets)} zero-balance wallets to {skipped_file}")
+                    
+                    success = True  # Consider it a success if we skipped all wallets due to no balance
+                    print("No recovery needed as all wallets had no balance.")
         
         # Cleanup - rename the recovery file once processed to prevent re-use
         if success:

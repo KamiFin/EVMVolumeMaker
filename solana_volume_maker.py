@@ -2026,6 +2026,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 "total_wallets": len(failed_wallets),
                 "recovered_wallets": 0,
                 "attempted_wallets": 0,
+                "skipped_wallets": 0,
                 "in_progress": True,
                 "wallets": []
             }
@@ -2042,6 +2043,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             # Track recovery results
             recovered_count = 0
             recovery_attempted = 0
+            skipped_count = 0
             still_failed_wallets = []
             
             # Process each failed wallet with multiple retry attempts
@@ -2063,6 +2065,37 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                     "recovered": False,
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
+                
+                # Check wallet balance first
+                try:
+                    # Check if the wallet has any funds
+                    pubkey = SoldersPubkey.from_string(wallet_address)
+                    balance_lamports = self.client.get_balance(pubkey).value
+                    balance_sol = balance_lamports / 1e9
+                    
+                    # Skip wallets with no or extremely low balance (less than 0.000001 SOL)
+                    if balance_lamports < 1000:
+                        logger.info(f"Skipping wallet {wallet_index} with no balance: {wallet_address} ({balance_sol} SOL)")
+                        wallet_tracking["skipped"] = True
+                        wallet_tracking["skip_reason"] = f"No balance - only {balance_sol} SOL"
+                        recovery_status["skipped_wallets"] = recovery_status.get("skipped_wallets", 0) + 1
+                        skipped_count += 1
+                        
+                        # Add to tracking
+                        recovery_status["wallets"].append(wallet_tracking)
+                        
+                        # Update tracking file after each wallet
+                        with open(recovery_tracking_file, "w") as f:
+                            json.dump(recovery_status, f, indent=2)
+                            
+                        continue
+                    
+                    logger.info(f"Wallet {wallet_index} has balance: {balance_sol} SOL - attempting recovery")
+                    
+                except Exception as e:
+                    logger.warning(f"Error checking balance for wallet {wallet_index}: {e}")
+                    # If we can't check the balance, we'll try to recover anyway
+                    logger.info(f"Proceeding with recovery attempt despite balance check error")
                 
                 logger.info(f"Attempting to recover wallet {wallet_index}: {wallet_address}")
                 recovery_attempted += 1
@@ -2119,11 +2152,13 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                             "recovery_attempts": wallet_tracking["attempts"]
                         })
             
-            # Calculate recovery success rate
-            recovery_success_rate = (recovered_count / len(failed_wallets)) * 100 if failed_wallets else 0
+            # Calculate recovery success rate based on attempted recoveries (exclude skipped wallets)
+            recovery_success_rate = 0
+            if recovery_attempted > 0:
+                recovery_success_rate = (recovered_count / recovery_attempted) * 100
             
             # Log recovery results
-            logger.info(f"Recovery process completed: {recovered_count}/{len(failed_wallets)} wallets recovered ({recovery_success_rate:.2f}%)")
+            logger.info(f"Recovery process completed: {recovered_count}/{recovery_attempted} wallets recovered ({recovery_success_rate:.2f}%), {skipped_count} wallets skipped")
             
             # Save any still failed wallets to a permanent file with timestamp
             if still_failed_wallets:
@@ -2145,14 +2180,16 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             recovery_status["in_progress"] = False
             recovery_status["timestamp_end"] = time.strftime("%Y-%m-%d %H:%M:%S")
             recovery_status["success_rate"] = f"{recovery_success_rate:.2f}%"
+            recovery_status["skipped_count"] = skipped_count
             
             # Save final status
             with open(recovery_tracking_file, "w") as f:
                 json.dump(recovery_status, f, indent=2)
             
             # If all wallets recovered, clean up the recovery file
-            if recovered_count == len(failed_wallets) and os.path.exists("failed_batch_wallets.json"):
+            if recovered_count == recovery_attempted and recovery_attempted > 0 and os.path.exists("failed_batch_wallets.json"):
                 try:
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
                     os.rename("failed_batch_wallets.json", f"failed_batch_wallets_{timestamp}_recovered.json")
                     logger.info("Renamed failed wallets recovery file as all wallets were recovered")
                 except Exception as e:
