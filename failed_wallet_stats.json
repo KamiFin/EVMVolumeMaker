@@ -1,0 +1,11 @@
+{
+  "cycles": [
+    {
+      "timestamp": "2025-04-24 08:15:44",
+      "failed_count": 3,
+      "recovery_file": "failed_batch_wallets_20250424_081544.json"
+    }
+  ],
+  "total_failed": 3,
+  "last_update": "2025-04-24 08:15:44"
+}

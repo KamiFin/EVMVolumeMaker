@@ -150,11 +150,12 @@ def main():
                 return False
             batch_wallets = recovery_data['batch_wallets']
         else:  # args.file == 'failed'
-            if not recovery_data:
-                print("ERROR: No failed batch wallets found in recovery file.")
-                logger.error("No failed batch wallets found in recovery file")
+            # Handle the new structure of failed_batch_wallets.json
+            if 'wallets' not in recovery_data or not recovery_data['wallets']:
+                print("ERROR: No failed wallets found in recovery file.")
+                logger.error("No failed wallets found in recovery file")
                 return False
-            batch_wallets = recovery_data
+            batch_wallets = recovery_data['wallets']
             
         print(f"\nFound {len(batch_wallets)} batch wallets in recovery file.")
         
@@ -174,6 +175,7 @@ def main():
             
             success_count = 0
             total_wallets = len(batch_wallets)
+            failed_wallets_info = []
             
             # Process each wallet with multi-signature buy
             # The multi-signature approach creates transactions that appear to be
@@ -183,10 +185,18 @@ def main():
                 logger.info(f"Processing batch wallet {i}: {wallet['address']} with multi-sig")
                 
                 try:
+                    # Prepare parameters for multi-signature buy
+                    # Create a temporary index entry in batch_wallets
+                    tmp_index = len(maker.batch_wallets)
+                    maker.batch_wallets.append(wallet)
+                    
                     # Execute multi-signature buy to recover funds
                     # This mimics the pattern used by professional trading operations
                     # and is more effective at emptying wallets completely
-                    success = maker._batch_multi_sig_buy(i, swap_amount)
+                    success = maker._batch_multi_sig_buy(tmp_index, swap_amount)
+                    
+                    # Remove the temporary wallet after use
+                    maker.batch_wallets.pop()
                     
                     if success:
                         print(f"✓ Successfully recovered funds from wallet {i+1}")
@@ -195,10 +205,35 @@ def main():
                     else:
                         print(f"✗ Failed to recover funds from wallet {i+1}")
                         logger.warning(f"Failed to recover funds from wallet {i}")
+                        # Track failed wallets for later reference
+                        failed_wallets_info.append({
+                            "address": wallet["address"],
+                            "private_key": wallet["private_key"],
+                            "reason": "Multi-signature buy failed"
+                        })
                         
                 except Exception as e:
                     print(f"✗ Error processing wallet {i+1}: {str(e)}")
                     logger.error(f"Error in multi-sig recovery for wallet {i}: {str(e)}")
+                    # Track failed wallets for later reference
+                    failed_wallets_info.append({
+                        "address": wallet["address"],
+                        "private_key": wallet["private_key"],
+                        "reason": str(e)
+                    })
+            
+            # Save failed wallets to a file if any
+            if failed_wallets_info:
+                import time
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                failed_file = f"recovery_failed_wallets_{timestamp}.json"
+                with open(failed_file, 'w') as f:
+                    json.dump({
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "wallets": failed_wallets_info
+                    }, f, indent=2)
+                print(f"\nSaved {len(failed_wallets_info)} failed wallets to {failed_file}")
+                logger.info(f"Saved {len(failed_wallets_info)} failed wallets to {failed_file}")
             
             # Determine overall success based on number of wallets processed
             if success_count > 0:
@@ -217,11 +252,33 @@ def main():
             logger.info("Using standard mode for recovery")
             print("Using standard recovery process...")
             
-            # Check if we're using the built-in recovery or need to pass failed wallets
+            # For the failed wallets file, we need to pass the wallets directly to the recovery function
             if args.file == 'batch':
+                # Use the built-in method for batch wallets recovery file
                 success = maker.recover_batch_wallets()
             else:  # args.file == 'failed'
-                success = maker._recover_failed_batch_wallets(batch_wallets, use_multi_sig=False, swap_amount=swap_amount)
+                # Convert wallet list to the format expected by _recover_failed_batch_wallets
+                failed_wallets_list = []
+                for i, wallet in enumerate(batch_wallets):
+                    # Each wallet entry needs wallet_index, address, and amount
+                    failed_wallets_list.append({
+                        "wallet_index": i,
+                        "address": wallet["address"],
+                        "amount": wallet.get("amount", swap_amount)
+                    })
+                
+                # Add wallets to maker.batch_wallets
+                maker.batch_wallets = batch_wallets
+                
+                # Call recovery with properly formatted wallet list
+                recovered_count, recovery_attempted, recovery_success_rate = maker._recover_failed_batch_wallets(
+                    failed_wallets_list, 
+                    use_multi_sig=True, 
+                    swap_amount=swap_amount
+                )
+                
+                success = recovered_count > 0
+                print(f"\nRecovered {recovered_count}/{recovery_attempted} wallets ({recovery_success_rate:.2f}% success rate)")
         
         # Cleanup - rename the recovery file once processed to prevent re-use
         if success:
@@ -242,10 +299,14 @@ def main():
             print("\n✗ Recovery operation failed or no wallets to recover.")
             print("  Check batch_recovery.log for details.")
             
+        return success
+            
     except Exception as e:
         # Log any unexpected errors that occur during recovery
         logger.error(f"Error in recovery: {e}")
         print(f"\n✗ Error during recovery: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":

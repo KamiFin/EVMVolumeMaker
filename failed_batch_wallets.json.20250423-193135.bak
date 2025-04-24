@@ -1,0 +1,26 @@
+{
+  "timestamp": "2025-04-23_18-25-52",
+  "main_wallet": "7b5dFfFXv2jV1Q4H3ZBcw3sgi6GouwC58o7c3TDSjne",
+  "batch_wallets": [
+    {
+      "address": "CbJxvZG46t7TEBmKCk4HfmBvZ7gcxbhvxMJmE38Kv98z",
+      "private_key": "313pnab4XRPtB96XLivzwr1zZ27msWDGNudnELDWPPAH4oRaPewmJS69DVy18HAu9YLFAUb7C6B3eTjQ4PYGim8z"
+    },
+    {
+      "address": "DVQwamQvwTDYoqXGHEkwJAKzzbohMqiPbPPvKSXuxh1e",
+      "private_key": "4ScqgC5JNH6QYuJV3TS2JiWCaZps64ipTkJHbX51FdEZJFHKQPZQaBQS1BNt9QqCn7FWCZ41nnitFFoy7NHAE1yN"
+    },
+    {
+      "address": "HahALywAyjmhBZD4VqBfS2fCRb8iRnWzEVTinEbeCwcW",
+      "private_key": "2ffiQaEnfQyYJVRJDJN6EEHmWaYg9rWCx7iFKFxb5LQb5eFWDxVVBqwycjkCAQAy6rv4PLpG4byH9gvkhbRYuYk2"
+    },
+    {
+      "address": "G1KLgtbAC4hQgYEFv7c7AJdHXhzaSH5x1WPGae2psML",
+      "private_key": "2ViYRn9FgVjWxMD8BFmm1SWrmYKDz6woSuANxrmKUKEpA8LWzsexBZpRigZKmmmZ5CmW1qYdqe5U6qcr74YyVAWN"
+    },
+    {
+      "address": "6Dh21EdmZByngeZ9DWF9D9rpBkEk11fzSjDz2DLZsf9w",
+      "private_key": "5pbQPPCGAXvtL8sSw6GakWe916LVq83uiLhX8Syw89V49VuSBQbM4Z24VH9xgboPm9K3GcRsQTqWUjMpEB2ZUPtH"
+    }
+  ]
+}

@@ -1708,6 +1708,8 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 
                 if not confirmed:
                     logger.error("Failed to confirm multi-transfer transaction")
+                    # Save batch wallets for potential manual recovery
+                    self._save_failed_wallets_to_permanent_file(batch_wallets, "funding_failed")
                     return False
                 
                 logger.info("Multi-transfer transaction confirmed! All batch wallets funded successfully")
@@ -1730,6 +1732,8 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 
             except Exception as e:
                 logger.error(f"Error creating or sending multi-transfer transaction: {e}")
+                # Save batch wallets for potential manual recovery
+                self._save_failed_wallets_to_permanent_file(batch_wallets, "funding_transaction_failed") 
                 return False
                 
             # Step 4: Perform buy transactions with each wallet ASYNCHRONOUSLY
@@ -1772,7 +1776,8 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                             failed_wallets.append({
                                 "wallet_index": result['wallet_index'],
                                 "address": result['address'],
-                                "amount": task["amount"]
+                                "amount": task["amount"],
+                                "error": error_msg
                             })
                     except Exception as e:
                         logger.error(f"Error processing result from wallet {task['wallet_index']}: {e}")
@@ -1780,38 +1785,91 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                         failed_wallets.append({
                             "wallet_index": task['wallet_index'],
                             "address": batch_wallets[task['wallet_index']]['address'],
-                            "amount": task["amount"]
+                            "amount": task["amount"],
+                            "error": str(e)
                         })
             
             # Log the results
             logger.info(f"Completed {buy_success_count}/{len(buy_tasks)} buy transactions successfully")
             
             # Handle failed wallets recovery
+            recovery_success_rate = 100.0  # Default to 100% if no failures
             if failed_wallets:
                 logger.info(f"Attempting to recover {len(failed_wallets)} failed wallets")
                 
                 # Save failed wallet info for later recovery if needed
                 self._save_failed_wallets_for_recovery(failed_wallets)
                 
-                # Attempt recovery in a separate thread to avoid blocking
-                recovery_thread = threading.Thread(
-                    target=self._recover_failed_batch_wallets,
-                    args=(failed_wallets, use_multi_sig, actual_swap_amount),
-                    daemon=True
-                )
-                recovery_thread.start()
-                logger.info("Started background recovery process for failed wallets")
+                # Determine if we should attempt recovery
+                should_attempt_recovery = True
+                
+                # If ALL wallets failed and there's more than 3, it might be a systemic issue
+                if len(failed_wallets) == len(buy_tasks) and len(failed_wallets) > 3:
+                    logger.warning("ALL wallets failed transactions - potential systemic issue")
+                    
+                    # Save all wallets to permanent file for manual recovery
+                    self._save_failed_wallets_to_permanent_file(batch_wallets, "all_transactions_failed")
+                    
+                    # Still attempt recovery, but with a warning
+                    logger.warning("Will attempt recovery, but cycle will likely fail")
+                
+                if should_attempt_recovery:
+                    # Run recovery process directly instead of in a separate thread
+                    # This ensures we know the results before proceeding
+                    recovered_count, recovery_attempted, recovery_success_rate = self._recover_failed_batch_wallets(
+                        failed_wallets, use_multi_sig, actual_swap_amount
+                    )
+                    
+                    # Update success count
+                    buy_success_count += recovered_count
+                    
+                    # Log recovery results
+                    logger.info(f"Recovery completed: {recovered_count}/{len(failed_wallets)} wallets recovered ({recovery_success_rate:.2f}%)")
+                    
+                    # If recovery rate is low in multi-sig mode, this might indicate a serious issue
+                    if use_multi_sig and recovery_success_rate < 30.0 and len(failed_wallets) > 3:
+                        logger.error(f"Poor recovery rate in multi-signature mode: {recovery_success_rate:.2f}%")
+                        
+                        # If recovery failed for most wallets, we should stop the cycle
+                        if recovery_success_rate == 0.0 and recovery_attempted >= 3:
+                            logger.error("Recovery completely failed. Stopping cycle to prevent further issues.")
+                            
+                            # Save all wallets to permanent file for manual recovery
+                            self._save_failed_wallets_to_permanent_file(batch_wallets, "recovery_completely_failed")
+                            
+                            # Clean up the in-progress flag
+                            self._clean_up_batch_mode_flag()
+                            
+                            return False
             
             # Clean up the in-progress flag
-            try:
-                if os.path.exists("batch_mode_in_progress.flag"):
-                    os.remove("batch_mode_in_progress.flag")
-                    logger.info("Removed batch mode in-progress flag")
-            except Exception as e:
-                logger.warning(f"Failed to remove batch mode in-progress flag: {e}")
+            self._clean_up_batch_mode_flag()
             
-            if buy_success_count == 0 and len(failed_wallets) == len(buy_tasks):
-                logger.error("All buy transactions failed")
+            # Different success criteria:
+            # 1. If no wallets failed, definitely successful
+            # 2. If some wallets failed but were recovered, consider successful
+            # 3. If less than 30% of wallets were successful, consider failed
+            success_threshold = 0.3
+            success_rate = buy_success_count / len(buy_tasks) if buy_tasks else 0
+            
+            if success_rate < success_threshold:
+                logger.error(f"Only {success_rate*100:.2f}% of transactions were successful, below threshold of {success_threshold*100:.2f}%")
+                
+                # Save all wallets to permanent file for manual recovery if poor success rate
+                if success_rate < 0.5:  # Less than 50% success
+                    self._save_failed_wallets_to_permanent_file(batch_wallets, "low_success_rate")
+                
+                # If recovery success rate was also low, this is definitely a failure
+                if recovery_success_rate < 20.0 and len(failed_wallets) > len(buy_tasks) / 2:
+                    logger.error("Both initial success rate and recovery success rate were low. Cycle failed.")
+                    return False
+                
+                # Even with poor success rate, we return true if at least some transactions worked
+                # to allow the process to continue but flag it in logs
+                if buy_success_count > 0:
+                    logger.warning("Some transactions worked, continuing with warnings")
+                    return True
+                
                 return False
                 
             return True
@@ -1820,7 +1878,56 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             logger.error(f"Error in batch mode: {e}")
             logger.error(traceback.format_exc())
             return False
+    
+    def _save_failed_wallets_to_permanent_file(self, wallets, failure_reason="unknown"):
+        """
+        Save wallet information to a permanent failure file with timestamp.
+        This is for wallets that failed for reasons that auto-recovery can't fix.
         
+        Args:
+            wallets (list): List of wallet dictionaries to save
+            failure_reason (str): Description of why the wallets failed
+        """
+        try:
+            # Create a timestamped filename
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"permanent_failed_wallets_{failure_reason}_{timestamp}.json"
+            
+            # Prepare data structure
+            failed_data = {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "failure_reason": failure_reason,
+                "wallets": []
+            }
+            
+            # Add all wallet details
+            for wallet in wallets:
+                failed_data["wallets"].append({
+                    "address": wallet["address"],
+                    "private_key": wallet["private_key"],
+                    "funded": wallet.get("funded", False)
+                })
+            
+            # Save to file
+            with open(filename, "w") as f:
+                json.dump(failed_data, f, indent=2)
+                
+            logger.info(f"Saved {len(wallets)} wallets to permanent failure file: {filename}")
+            
+            return filename
+        except Exception as e:
+            logger.error(f"Error saving wallets to permanent failure file: {e}")
+            return None
+    
+    def _clean_up_batch_mode_flag(self):
+        """Clean up the batch mode in-progress flag"""
+        try:
+            if os.path.exists("batch_mode_in_progress.flag"):
+                os.remove("batch_mode_in_progress.flag")
+                logger.info("Removed batch mode in-progress flag")
+        except Exception as e:
+            logger.warning(f"Failed to remove batch mode in-progress flag: {e}")
+
     def _save_failed_wallets_for_recovery(self, failed_wallets):
         """
         Save failed wallet information to a recovery file.
@@ -1829,6 +1936,9 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             failed_wallets (list): List of dictionaries containing failed wallet info
         """
         try:
+            # Get timestamp for unique filenames
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            
             # Create recovery data structure
             recovery_data = {
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1848,13 +1958,52 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             
             # Only save if we have wallets to recover
             if recovery_data["wallets"]:
-                # Save to file
+                # Save to the main recovery file (overwrite)
                 with open("failed_batch_wallets.json", "w") as f:
                     json.dump(recovery_data, f, indent=2)
                 logger.info(f"Saved {len(recovery_data['wallets'])} failed wallets to recovery file")
+                
+                # Also save to a timestamped file for historical tracking
+                historical_filename = f"failed_batch_wallets_{timestamp}.json"
+                with open(historical_filename, "w") as f:
+                    json.dump(recovery_data, f, indent=2)
+                logger.info(f"Also saved failed wallets to historical file: {historical_filename}")
+                
+                # Add failed wallet count to a tracking file
+                try:
+                    failed_count_file = "failed_wallet_stats.json"
+                    failed_stats = {}
+                    
+                    if os.path.exists(failed_count_file):
+                        with open(failed_count_file, "r") as f:
+                            failed_stats = json.load(f)
+                    
+                    # Initialize stats structure if needed
+                    if "cycles" not in failed_stats:
+                        failed_stats["cycles"] = []
+                    
+                    # Add this cycle's information
+                    cycle_info = {
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "failed_count": len(recovery_data["wallets"]),
+                        "recovery_file": historical_filename
+                    }
+                    failed_stats["cycles"].append(cycle_info)
+                    
+                    # Track total failures
+                    failed_stats["total_failed"] = failed_stats.get("total_failed", 0) + len(recovery_data["wallets"])
+                    failed_stats["last_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # Save the updated stats
+                    with open(failed_count_file, "w") as f:
+                        json.dump(failed_stats, f, indent=2)
+                        
+                except Exception as e:
+                    logger.warning(f"Error updating failed wallet stats: {e}")
+                
         except Exception as e:
             logger.error(f"Error saving failed wallets for recovery: {e}")
-            
+    
     def _recover_failed_batch_wallets(self, failed_wallets, use_multi_sig=True, swap_amount=0.00001):
         """
         Attempt to recover funds from failed batch wallets in the background.
@@ -1863,9 +2012,27 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             failed_wallets (list): List of dictionaries containing failed wallet info
             use_multi_sig (bool): Whether to use multi-signature mode for recovery
             swap_amount (float): Amount to use for swap during recovery
+            
+        Returns:
+            tuple: (recovered_count, recovery_attempted_count, recovery_success_rate)
         """
         try:
             logger.info(f"Starting recovery process for {len(failed_wallets)} failed wallets")
+            
+            # Create recovery tracking file
+            recovery_tracking_file = f"recovery_attempt_{time.strftime('%Y%m%d_%H%M%S')}.json"
+            recovery_status = {
+                "timestamp_start": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_wallets": len(failed_wallets),
+                "recovered_wallets": 0,
+                "attempted_wallets": 0,
+                "in_progress": True,
+                "wallets": []
+            }
+            
+            # Save initial status
+            with open(recovery_tracking_file, "w") as f:
+                json.dump(recovery_status, f, indent=2)
             
             # Add a delay to let main transactions complete
             recovery_delay = 10
@@ -1874,6 +2041,8 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             
             # Track recovery results
             recovered_count = 0
+            recovery_attempted = 0
+            still_failed_wallets = []
             
             # Process each failed wallet with multiple retry attempts
             max_retries = 3
@@ -1886,9 +2055,20 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                     logger.warning(f"Wallet index {wallet_index} is out of range for recovery")
                     continue
                 
+                # Track this wallet
+                wallet_tracking = {
+                    "address": wallet_address,
+                    "index": wallet_index,
+                    "attempts": 0,
+                    "recovered": False,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
                 logger.info(f"Attempting to recover wallet {wallet_index}: {wallet_address}")
+                recovery_attempted += 1
                 
                 # Try multiple times with increasing delays
+                wallet_success = False
                 for attempt in range(max_retries):
                     try:
                         # Wait between attempts
@@ -1896,6 +2076,8 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                             retry_delay = 5 * attempt
                             logger.info(f"Retry {attempt+1}/{max_retries} after {retry_delay} seconds...")
                             time.sleep(retry_delay)
+                        
+                        wallet_tracking["attempts"] += 1
                         
                         # Use multi-sig for more reliable recovery
                         if use_multi_sig:
@@ -1906,26 +2088,82 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                         if success:
                             logger.info(f"Successfully recovered wallet {wallet_index}: {wallet_address}")
                             recovered_count += 1
+                            wallet_success = True
+                            wallet_tracking["recovered"] = True
                             break
                         else:
                             logger.warning(f"Failed to recover wallet {wallet_index} (attempt {attempt+1}/{max_retries})")
                     except Exception as e:
                         logger.error(f"Error in recovery attempt {attempt+1} for wallet {wallet_index}: {e}")
+                        wallet_tracking["last_error"] = str(e)
+                
+                # Add to tracking
+                recovery_status["wallets"].append(wallet_tracking)
+                recovery_status["recovered_wallets"] = recovered_count
+                recovery_status["attempted_wallets"] = recovery_attempted
+                
+                # Update tracking file after each wallet
+                with open(recovery_tracking_file, "w") as f:
+                    json.dump(recovery_status, f, indent=2)
+                
+                # If wallet wasn't recovered, add to the still failed list
+                if not wallet_success:
+                    # Get the full wallet details from batch_wallets
+                    if wallet_index < len(self.batch_wallets):
+                        batch_wallet = self.batch_wallets[wallet_index]
+                        still_failed_wallets.append({
+                            "wallet_index": wallet_index,
+                            "address": batch_wallet["address"],
+                            "private_key": batch_wallet["private_key"],
+                            "amount": failed.get("amount", 0.00001),
+                            "recovery_attempts": wallet_tracking["attempts"]
+                        })
+            
+            # Calculate recovery success rate
+            recovery_success_rate = (recovered_count / len(failed_wallets)) * 100 if failed_wallets else 0
             
             # Log recovery results
-            logger.info(f"Recovery process completed: {recovered_count}/{len(failed_wallets)} wallets recovered")
+            logger.info(f"Recovery process completed: {recovered_count}/{len(failed_wallets)} wallets recovered ({recovery_success_rate:.2f}%)")
+            
+            # Save any still failed wallets to a permanent file with timestamp
+            if still_failed_wallets:
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                still_failed_file = f"permanent_failed_wallets_{timestamp}.json"
+                
+                still_failed_data = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "recovery_attempted": True,
+                    "wallets": still_failed_wallets
+                }
+                
+                with open(still_failed_file, "w") as f:
+                    json.dump(still_failed_data, f, indent=2)
+                    
+                logger.info(f"Saved {len(still_failed_wallets)} permanently failed wallets to: {still_failed_file}")
+            
+            # Update recovery status to mark as completed
+            recovery_status["in_progress"] = False
+            recovery_status["timestamp_end"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            recovery_status["success_rate"] = f"{recovery_success_rate:.2f}%"
+            
+            # Save final status
+            with open(recovery_tracking_file, "w") as f:
+                json.dump(recovery_status, f, indent=2)
             
             # If all wallets recovered, clean up the recovery file
             if recovered_count == len(failed_wallets) and os.path.exists("failed_batch_wallets.json"):
                 try:
-                    os.remove("failed_batch_wallets.json")
-                    logger.info("Removed failed wallets recovery file as all wallets were recovered")
+                    os.rename("failed_batch_wallets.json", f"failed_batch_wallets_{timestamp}_recovered.json")
+                    logger.info("Renamed failed wallets recovery file as all wallets were recovered")
                 except Exception as e:
-                    logger.warning(f"Failed to remove recovery file: {e}")
+                    logger.warning(f"Failed to rename recovery file: {e}")
+            
+            return recovered_count, recovery_attempted, recovery_success_rate
                     
         except Exception as e:
             logger.error(f"Error in recovery process: {e}")
-            logger.error(traceback.format_exc())    
+            logger.error(traceback.format_exc())
+            return 0, 0, 0
 
     def cyclic_batch_mode(self, total_wallet_count=20, wallets_per_cycle=5, amount_per_wallet=0.001, use_multi_sig=True, swap_amount=None, max_cycle_retries=1):
         """

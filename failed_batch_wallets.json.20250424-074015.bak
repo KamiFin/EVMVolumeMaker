@@ -1,0 +1,10 @@
+{
+  "timestamp": "2025-04-24_07-40-15",
+  "main_wallet": "7b5dFfFXv2jV1Q4H3ZBcw3sgi6GouwC58o7c3TDSjne",
+  "batch_wallets": [
+    {
+      "address": "GdTyVbmvtXR7BNNjCEa5V4zv3hju8NapnUDpAHNSsP95",
+      "private_key": "4D2YBiG6EMfnr4ntnD2gKhExXewVN3SqbYPB5RDy7knZXvByQysyTzmLTMXSd56wpEyY8RGmEfpGGAMt8ibPre8T"
+    }
+  ]
+}
