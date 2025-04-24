@@ -70,7 +70,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
 import threading
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("volume_maker.log"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# Define the wallet recovery directory
+WALLET_RECOVERY_DIR = "wallet_recovery"
+# Ensure the wallet recovery directory exists
+os.makedirs(WALLET_RECOVERY_DIR, exist_ok=True)
 
 class SolanaVolumeMaker(BaseVolumeMaker):
     """Solana-specific implementation of volume maker"""
@@ -826,7 +840,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
         Save batch wallets to a temporary file for recovery in case of program crash.
         """
         try:
-            batch_recovery_file = "batch_wallets_recovery.json"
+            batch_recovery_file = os.path.join(WALLET_RECOVERY_DIR, "batch_wallets_recovery.json")
             
             # Get timestamp
             timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -854,11 +868,24 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             bool: True if recovery was successful, False otherwise
         """
         try:
-            batch_recovery_file = "batch_wallets_recovery.json"
+            batch_recovery_file = os.path.join(WALLET_RECOVERY_DIR, "batch_wallets_recovery.json")
             
+            # Check if new directory file exists, otherwise check for old file in root directory
             if not os.path.exists(batch_recovery_file):
-                logger.error("No batch wallet recovery file found")
-                return False
+                # Check if old file exists in root directory
+                old_recovery_file = "batch_wallets_recovery.json"
+                if os.path.exists(old_recovery_file):
+                    # Migrate the old file to the new location
+                    with open(old_recovery_file, 'r') as f:
+                        recovery_data = json.load(f)
+                    
+                    with open(batch_recovery_file, 'w') as f:
+                        json.dump(recovery_data, f, indent=4)
+                    
+                    logger.info(f"Migrated {old_recovery_file} to {batch_recovery_file}")
+                else:
+                    logger.error("No batch wallet recovery file found")
+                    return False
                 
             with open(batch_recovery_file, 'r') as f:
                 recovery_data = json.load(f)
@@ -1891,7 +1918,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
         try:
             # Create a timestamped filename
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"permanent_failed_wallets_{failure_reason}_{timestamp}.json"
+            filename = os.path.join(WALLET_RECOVERY_DIR, f"permanent_failed_wallets_{failure_reason}_{timestamp}.json")
             
             # Prepare data structure
             failed_data = {
@@ -1959,19 +1986,20 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             # Only save if we have wallets to recover
             if recovery_data["wallets"]:
                 # Save to the main recovery file (overwrite)
-                with open("failed_batch_wallets.json", "w") as f:
+                recovery_file = os.path.join(WALLET_RECOVERY_DIR, "failed_batch_wallets.json")
+                with open(recovery_file, "w") as f:
                     json.dump(recovery_data, f, indent=2)
                 logger.info(f"Saved {len(recovery_data['wallets'])} failed wallets to recovery file")
                 
                 # Also save to a timestamped file for historical tracking
-                historical_filename = f"failed_batch_wallets_{timestamp}.json"
+                historical_filename = os.path.join(WALLET_RECOVERY_DIR, f"failed_batch_wallets_{timestamp}.json")
                 with open(historical_filename, "w") as f:
                     json.dump(recovery_data, f, indent=2)
                 logger.info(f"Also saved failed wallets to historical file: {historical_filename}")
                 
                 # Add failed wallet count to a tracking file
                 try:
-                    failed_count_file = "failed_wallet_stats.json"
+                    failed_count_file = os.path.join(WALLET_RECOVERY_DIR, "failed_wallet_stats.json")
                     failed_stats = {}
                     
                     if os.path.exists(failed_count_file):
@@ -2020,7 +2048,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             logger.info(f"Starting recovery process for {len(failed_wallets)} failed wallets")
             
             # Create recovery tracking file
-            recovery_tracking_file = f"recovery_attempt_{time.strftime('%Y%m%d_%H%M%S')}.json"
+            recovery_tracking_file = os.path.join(WALLET_RECOVERY_DIR, f"recovery_attempt_{time.strftime('%Y%m%d_%H%M%S')}.json")
             recovery_status = {
                 "timestamp_start": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "total_wallets": len(failed_wallets),
@@ -2163,7 +2191,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             # Save any still failed wallets to a permanent file with timestamp
             if still_failed_wallets:
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-                still_failed_file = f"permanent_failed_wallets_{timestamp}.json"
+                still_failed_file = os.path.join(WALLET_RECOVERY_DIR, f"permanent_failed_wallets_{timestamp}.json")
                 
                 still_failed_data = {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2187,10 +2215,12 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 json.dump(recovery_status, f, indent=2)
             
             # If all wallets recovered, clean up the recovery file
-            if recovered_count == recovery_attempted and recovery_attempted > 0 and os.path.exists("failed_batch_wallets.json"):
+            failed_batch_file = os.path.join(WALLET_RECOVERY_DIR, "failed_batch_wallets.json")
+            if recovered_count == recovery_attempted and recovery_attempted > 0 and os.path.exists(failed_batch_file):
                 try:
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    os.rename("failed_batch_wallets.json", f"failed_batch_wallets_{timestamp}_recovered.json")
+                    recovered_file = os.path.join(WALLET_RECOVERY_DIR, f"failed_batch_wallets_{timestamp}_recovered.json")
+                    os.rename(failed_batch_file, recovered_file)
                     logger.info("Renamed failed wallets recovery file as all wallets were recovered")
                 except Exception as e:
                     logger.warning(f"Failed to rename recovery file: {e}")

@@ -16,8 +16,8 @@ Options:
                        'failed' - Use failed_batch_wallets.json
 
 Recovery Files:
-    - batch_wallets_recovery.json: Contains wallets from the last batch mode run
-    - failed_batch_wallets.json: Contains all batch wallets that have failed
+    - wallet_recovery/batch_wallets_recovery.json: Contains wallets from the last batch mode run
+    - wallet_recovery/failed_batch_wallets.json: Contains all batch wallets that have failed
 
 Recovery Methods:
     1. Standard Recovery:
@@ -50,6 +50,9 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Define the wallet recovery directory
+WALLET_RECOVERY_DIR = "wallet_recovery"
 
 def parse_args():
     """
@@ -87,12 +90,15 @@ def main():
     use_multisig = args.use_multisig
     swap_amount = args.swap_amount
     
+    # Ensure wallet recovery directory exists
+    os.makedirs(WALLET_RECOVERY_DIR, exist_ok=True)
+    
     # Determine which recovery file to use based on the --file argument
     if args.file == 'batch':
-        recovery_file = "batch_wallets_recovery.json"
+        recovery_file = os.path.join(WALLET_RECOVERY_DIR, "batch_wallets_recovery.json")
         file_desc = "last batch mode run"
     else:  # args.file == 'failed'
-        recovery_file = "failed_batch_wallets.json"
+        recovery_file = os.path.join(WALLET_RECOVERY_DIR, "failed_batch_wallets.json")
         file_desc = "all failed batch operations"
     
     try:
@@ -105,9 +111,22 @@ def main():
         
         # Check if the recovery file exists
         if not os.path.exists(recovery_file):
-            print(f"ERROR: {recovery_file} not found. Cannot proceed with recovery.")
-            logger.error(f"{recovery_file} file not found")
-            return False
+            # Check if an old file exists in the root directory and migrate it
+            old_recovery_file = os.path.basename(recovery_file)
+            if os.path.exists(old_recovery_file):
+                # Migrate the old file to the new location
+                with open(old_recovery_file, 'r') as f:
+                    recovery_data = json.load(f)
+                
+                with open(recovery_file, 'w') as f:
+                    json.dump(recovery_data, f, indent=4)
+                
+                print(f"Migrated {old_recovery_file} to {recovery_file}")
+                logger.info(f"Migrated {old_recovery_file} to {recovery_file}")
+            else:
+                print(f"ERROR: {recovery_file} not found. Cannot proceed with recovery.")
+                logger.error(f"{recovery_file} file not found")
+                return False
         
         print(f"Using recovery file: {recovery_file} (contains wallets from {file_desc})")
         
@@ -249,7 +268,7 @@ def main():
             if failed_wallets_info:
                 import time
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
-                failed_file = f"recovery_failed_wallets_{timestamp}.json"
+                failed_file = os.path.join(WALLET_RECOVERY_DIR, f"recovery_failed_wallets_{timestamp}.json")
                 with open(failed_file, 'w') as f:
                     json.dump({
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -337,7 +356,7 @@ def main():
                         # Save skipped wallets to a file
                         import time
                         timestamp = time.strftime("%Y%m%d-%H%M%S")
-                        skipped_file = f"skipped_zero_balance_wallets_{timestamp}.json"
+                        skipped_file = os.path.join(WALLET_RECOVERY_DIR, f"skipped_zero_balance_wallets_{timestamp}.json")
                         with open(skipped_file, 'w') as f:
                             json.dump({
                                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -354,9 +373,10 @@ def main():
             try:
                 import time
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
-                os.rename(recovery_file, f"{recovery_file}.{timestamp}.bak")
-                logger.info(f"Renamed {recovery_file} to {recovery_file}.{timestamp}.bak")
-                print(f"\nRenamed {recovery_file} to {recovery_file}.{timestamp}.bak")
+                backup_file = os.path.join(WALLET_RECOVERY_DIR, f"{os.path.basename(recovery_file)}.{timestamp}.bak")
+                os.rename(recovery_file, backup_file)
+                logger.info(f"Renamed {recovery_file} to {backup_file}")
+                print(f"\nRenamed {recovery_file} to {backup_file}")
             except Exception as e:
                 logger.warning(f"Could not rename recovery file: {str(e)}")
         
