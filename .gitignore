@@ -41,6 +41,13 @@ batch_recovery.log
 batch_mode_in_progress.flag
 infinite_mode_running.flag
 failed_batch_wallets.json
+wallet_recovery/
+failed_batch_wallets_*.json
+failed_batch_wallets_*_recovered.json
+permanent_failed_wallets_*.json
+recovery_attempt_*.json
+recovery_failed_wallets_*.json
+skipped_zero_balance_wallets_*.json
 
 # Flags file
 *.flag
