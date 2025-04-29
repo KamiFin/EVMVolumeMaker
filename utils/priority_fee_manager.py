@@ -18,7 +18,7 @@ from typing import Dict, Optional, Literal, Union, List
 logger = logging.getLogger(__name__)
 
 # Priority fee levels
-PriorityLevel = Literal["Min", "Low", "Medium", "High", "VeryHigh", "UnsafeMax"]
+PriorityLevel = Literal["Medium", "High", "VeryHigh", "UnsafeMax"]
 
 class PriorityFeeManager:
     """
@@ -43,13 +43,11 @@ class PriorityFeeManager:
         self.update_interval = update_interval
         
         # Initialize fee cache
-        self.fee_cache: Dict[str, float] = {
-            "min": 0.0,
-            "low": 1000.0,
-            "medium": 10000.0,
-            "high": 100000.0,
-            "veryHigh": 1000000.0,
-            "unsafeMax": 5000000.0,
+        self.fee_cache: Dict[str, int] = {
+            "medium": 40000,
+            "high": 100000,
+            "veryHigh": 1000000,
+            "unsafeMax": 5000000,
         }
         
         # Track last update time
@@ -114,7 +112,14 @@ class PriorityFeeManager:
             if response.status_code == 200:
                 result = response.json()
                 if "result" in result and "priorityFeeLevels" in result["result"]:
-                    self.fee_cache = result["result"]["priorityFeeLevels"]
+                    priority_fees_result = result["result"]["priorityFeeLevels"]
+                    self.fee_cache = {
+                        "medium": int(priority_fees_result["medium"]),
+                        "high": int(priority_fees_result["high"]),
+                        "veryHigh": int(priority_fees_result["veryHigh"]),
+                        "unsafeMax": int(priority_fees_result["unsafeMax"])
+                    }
+
                     self.last_update_time = time.time()
                     self.last_fetch_success = True
                     logger.info(f"Priority fees updated: {json.dumps(self.fee_cache)}")
@@ -137,7 +142,7 @@ class PriorityFeeManager:
             self.last_fetch_success = False
             return False
     
-    def get_priority_fee(self, priority_level: Optional[PriorityLevel] = None) -> float:
+    def get_priority_fee(self, priority_level: Optional[PriorityLevel] = None) -> int:
         """
         Get the priority fee for a specified level
         
@@ -145,7 +150,7 @@ class PriorityFeeManager:
             priority_level (Optional[PriorityLevel]): The priority level to use, or None to use current global level
             
         Returns:
-            float: The priority fee in microlamports
+            int: The priority fee in microlamports
         """
         level = priority_level.lower() if priority_level else self.current_level.lower()
         return self.fee_cache.get(level, self.fee_cache["medium"])
@@ -154,7 +159,7 @@ class PriorityFeeManager:
         self,
         transaction: Optional[Union[object, object]],  # Using generic object type for flexibility
         priority_level: Optional[PriorityLevel] = None
-    ) -> float:
+    ) -> int:
         """
         Get priority fee estimate for a specific transaction
         
@@ -164,7 +169,7 @@ class PriorityFeeManager:
             priority_level: Optional priority level, uses global level if not specified
             
         Returns:
-            float: The priority fee in microlamports
+            int: The priority fee in microlamports
         """
         try:
             # If no transaction provided, use regular level-based fee
@@ -211,7 +216,7 @@ class PriorityFeeManager:
             logger.error(f"Error getting transaction-specific priority fee: {str(e)}")
             return self.get_priority_fee(priority_level)
     
-    def handle_transaction_failure(self, error: Exception) -> float:
+    def handle_transaction_failure(self, error: Exception) -> int:
         """
         Handle transaction failure by potentially increasing priority level
         
@@ -219,7 +224,7 @@ class PriorityFeeManager:
             error: The exception that occurred
             
         Returns:
-            float: New priority fee to use for retry
+            int: New priority fee to use for retry
         """
         error_str = str(error).lower()
         
@@ -275,29 +280,29 @@ class PriorityFeeManager:
         # we're not at the lowest level
         return (
             self.last_fetch_success and 
-            self.current_level != "Low" and
+            self.current_level != "Medium" and
             self.failed_tx_count == 0
         )
     
     def _step_down_priority_level(self):
         """Step down the priority level by one"""
         priority_levels: List[PriorityLevel] = [
-            "Min", "Low", "Medium", "High", "VeryHigh", "UnsafeMax"
+            "Medium", "High", "VeryHigh", "UnsafeMax"
         ]
         
         current_index = priority_levels.index(self.current_level)
-        if current_index > 1:  # Don't go below Low
+        if current_index > 0:  # Don't go below Medium
             new_level = priority_levels[current_index - 1]
             prev_level = self.current_level
             self.current_level = new_level
             logger.info(f"Decreased priority level: {prev_level} -> {new_level}")
             
             # Exit recovery mode if we're back to Medium or lower
-            if current_index - 1 <= 2:  # Medium is at index 2
+            if current_index - 1 <= 0:  # Medium is at index 0
                 logger.info("Exiting recovery mode")
                 self.in_recovery_mode = False
     
-    def _get_escalated_fee(self) -> float:
+    def _get_escalated_fee(self) -> int:
         """Get an escalated fee based on current failure state"""
         if self.failed_tx_count >= 5:
             # For severe failures, use UnsafeMax
@@ -313,7 +318,7 @@ class PriorityFeeManager:
     def _get_next_priority_level(self, current: PriorityLevel) -> PriorityLevel:
         """Get the next higher priority level"""
         priority_levels: List[PriorityLevel] = [
-            "Min", "Low", "Medium", "High", "VeryHigh", "UnsafeMax"
+            "Medium", "High", "VeryHigh", "UnsafeMax"
         ]
         
         try:

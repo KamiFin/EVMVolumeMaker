@@ -6,9 +6,11 @@ import os
 import signal
 import base58
 import base64
+import sys
 import concurrent.futures
 from solana.rpc.api import Client
 from solders.keypair import Keypair 
+import math 
 from base_volume_maker import BaseVolumeMaker, CycleResult
 from solana_config import (
     CHAIN_NAME,
@@ -70,8 +72,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
 import threading
 # Get the current priority level from the fee manager instead of hardcoding "Medium"
-from utils.solana_utils import _priority_fee_manager
-
+from utils.solana_utils import _priority_fee_manager, set_priority_fee_manager
+from utils.priority_fee_manager import PriorityFeeManager
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -107,7 +109,10 @@ class SolanaVolumeMaker(BaseVolumeMaker):
         
         # Initialize base class
         super().__init__(chain_name, mode, single_wallet)
-        
+
+        #Initialize priority fee manager
+        self.priority_fee_manager = self.initialize_priority_fee_manager()
+        set_priority_fee_manager(self.priority_fee_manager)
         # Initialize Solana client
         self.client = self._get_connection()
         
@@ -154,6 +159,27 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 self.CONFIG_FILE = 'config.json'
         
         return Config()
+    
+    def initialize_priority_fee_manager(self) -> PriorityFeeManager:
+        """Initialize the PriorityFeeManager with Helius RPC"""
+        helius_url = self.config.RPC_URL
+        if not helius_url:
+            logger.error("No valid RPC URL found for priority fee manager.")
+            sys.exit(1)
+        
+        logger.info(f"Initializing priority fee manager with Helius RPC: {helius_url}")
+        fee_manager = PriorityFeeManager(helius_url, update_interval=300)  # Update every 5 minutes
+        
+        # Wait for initial fee fetch
+        time.sleep(1)
+        
+        # Display current fee levels
+        logger.info("Current priority fees:")
+        for level in ["Min", "Low", "Medium", "High", "VeryHigh", "UnsafeMax"]:
+            fee = fee_manager.get_priority_fee(level)
+            logger.info(f"  {level}: {fee} microlamports")
+        
+        return fee_manager
 
     def _get_connection(self):
         """Get Solana RPC connection with fallback"""
@@ -1380,7 +1406,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                     current_priority_level = _priority_fee_manager.get_current_priority_level()
                     logger.info(f"Using current priority level from manager: {current_priority_level}")
                 # Get transaction-specific priority fee
-                priority_fee = get_transaction_compute_unit_price(mock_transaction, "Medium")
+                priority_fee = get_transaction_compute_unit_price(mock_transaction, current_priority_level)
                 logger.info(f"Transaction-specific priority fee: {priority_fee} microlamports")
             except Exception as e:
                 logger.warning(f"Failed to get transaction-specific priority fee: {e}")
@@ -1391,7 +1417,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             # Calculate transfer amount, reserving enough for priority fees
             # Priority fee is in microlamports, convert to lamports and provide safety buffer
 
-            estimated_fee_lamports = int((priority_fee * 200000) / 1e6 )   # Cast to int here
+            estimated_fee_lamports = math.ceil((priority_fee * 200000) / 1e6 )   # Cast to int here
             
             transfer_amount = int(0.00099 * 1e9) - estimated_fee_lamports
             logger.info(f"Using dynamic transfer amount: {transfer_amount} lamports (reserved {priority_fee} for fees)")
