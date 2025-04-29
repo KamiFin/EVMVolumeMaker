@@ -15,6 +15,8 @@ import time
 import json
 import logging
 import random
+import requests
+import base58
 from typing import Optional
 from pathlib import Path
 
@@ -392,6 +394,106 @@ def simulate_error_recovery():
         fee_manager.shutdown()
     except Exception as e:
         logger.error(f"Error in error recovery simulation: {e}")
+
+def send_transaction_with_priority_fee(self, transaction, signer, priority_level="Medium"):
+    """
+    Send a transaction with priority fees using Helius API
+    
+    Args:
+        transaction: The transaction to send
+        signer: The keypair to sign with
+        priority_level: Priority level ("Min", "Low", "Medium", "High", "VeryHigh", "UnsafeMax")
+        
+    Returns:
+        str: Transaction signature if successful
+    """
+    try:
+        # First, serialize the transaction
+        transaction_bytes = transaction.serialize()
+        
+        # Encode transaction to base58
+        encoded_transaction = base58.b58encode(transaction_bytes).decode('utf-8')
+        
+        # Get priority fee from Helius API
+        helius_url = self.config.RPC_URL  # Assuming this is the Helius RPC URL
+        
+        # Create payload for Helius API
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "getPriorityFeeEstimate",
+            "params": [{
+                "transaction": encoded_transaction,
+                "options": {"priorityLevel": priority_level}
+            }]
+        }
+        
+        # Send request to Helius API
+        response = requests.post(
+            helius_url,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=10
+        )
+        
+        # Parse response
+        if response.status_code == 200:
+            result = response.json()
+            if "result" in result and "priorityFeeEstimate" in result["result"]:
+                fee_estimate = result["result"]["priorityFeeEstimate"]
+                logger.info(f"Priority fee estimate: {fee_estimate} microlamports (level: {priority_level})")
+                
+                # Create compute budget instructions
+                compute_unit_price_ix = set_compute_unit_price(int(fee_estimate))
+                compute_unit_limit_ix = set_compute_unit_limit(2500)  # Standard compute limit
+                
+                # Get blockhash for new transaction
+                blockhash_response = self.client.get_latest_blockhash()
+                blockhash = blockhash_response.value.blockhash
+                
+                # Create new instructions list with compute budget at the beginning
+                if isinstance(transaction, VersionedTransaction):
+                    # For versioned transactions
+                    instructions = [compute_unit_price_ix, compute_unit_limit_ix]
+                    
+                    # Extract existing instructions
+                    for ix in transaction.message.instructions:
+                        instructions.append(ix)
+                    
+                    # Create new message and transaction
+                    compiled_message = MessageV0.try_compile(
+                        signer.pubkey(),
+                        instructions,
+                        [],  # No lookup tables
+                        blockhash
+                    )
+                    new_transaction = VersionedTransaction(compiled_message, [signer])
+               
+                
+                # Send transaction with priority fee
+                txn_sig = self.client.send_transaction(
+                    txn=new_transaction,
+                    opts=TxOpts(skip_preflight=False)
+                ).value
+                
+                logger.info(f"Transaction with priority fee sent! Signature: {txn_sig}")
+                return txn_sig
+            else:
+                logger.warning(f"Unexpected response format: {result}")
+        else:
+            logger.error(f"Failed to fetch priority fees: {response.status_code} - {response.text}")
+        
+        # If we couldn't get priority fee, send the original transaction
+        logger.warning("Falling back to sending transaction without priority fee")
+        txn_sig = self.client.send_transaction(
+            txn=transaction,
+            opts=TxOpts(skip_preflight=False)
+        ).value
+        return txn_sig
+    
+    except Exception as e:
+        logger.error(f"Error sending transaction with priority fee: {e}")
+        raise
 
 if __name__ == "__main__":
     try:

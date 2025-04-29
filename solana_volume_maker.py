@@ -38,7 +38,7 @@ from solders.message import Message
 from solders.transaction import VersionedTransaction, Transaction
 from solana.transaction import Transaction as SolanaTransaction
 from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
-from utils.solana_utils import get_optimal_compute_unit_price
+from utils.solana_utils import get_optimal_compute_unit_price, get_transaction_compute_unit_price
 from utils.common_utils import confirm_txn
 from solders.commitment_config import CommitmentLevel
 from solana.rpc.types import TxOpts, TokenAccountOpts
@@ -1215,17 +1215,7 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             batch_balance = 0.001  # Assume minimum balance
             if batch_wallet.get('funded', False):
                 logger.info(f"Batch wallet {wallet_index} is marked as funded - proceeding with transaction")
-            else:
-                # Only if not marked as funded, do a quick check
-                try:
-                    balance_lamports = self.client.get_balance(batch_keypair.pubkey()).value
-                    batch_balance = balance_lamports / 1e9
-                    logger.info(f"Batch wallet balance: {batch_balance} SOL")
-                    if batch_balance >= 0.001:
-                        batch_wallet['funded'] = True
-                except Exception as e:
-                        # If we can't check, proceed anyway - transaction will fail if truly unfunded
-                        logger.warning(f"Failed to get balance, proceeding anyway: {e}")
+            
             
             # Minimum SOL needed for rent exemption and operations
             min_required_main = 0.005  # For rent exemption and fees
@@ -1334,7 +1324,75 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             
             # Use a small transfer amount for the batch wallet
             logger.info("Creating transfer instruction from batch wallet to main wallet...")
-            transfer_amount = int(0.00099 * 1e9)  # 0.00099 SOL
+            
+            # Get priority fee from the priority fee manager
+            from utils.solana_utils import get_optimal_compute_unit_price, get_transaction_compute_unit_price
+            
+            # Create a mock transaction for fee estimation
+            logger.info("Estimating priority fees for the transaction...")
+            
+            base_instructions = [
+                create_wsol_account_instruction,
+                init_wsol_account_instruction,
+            ]  
+
+            if create_token_account_instruction:
+                base_instructions.append(create_token_account_instruction)
+                
+            base_instructions.append(swap_instruction)
+            base_instructions.append(close_wsol_account_instruction)  # Include the close account instruction
+
+            transfer_amount = int(0.00099 * 1e9)
+
+            transfer_ix = transfer(
+                TransferParams(
+                    from_pubkey=batch_keypair.pubkey(),
+                    to_pubkey=main_keypair.pubkey(),
+                    lamports=transfer_amount
+                )
+            ) #Mock txn to get priority fees
+           
+           
+            mock_instructions = base_instructions.copy()  # Copy the currently assembled instructions
+            mock_instructions.append(transfer_ix)
+
+            # Get latest blockhash
+            blockhash_response = self.client.get_latest_blockhash()
+            blockhash = blockhash_response.value.blockhash
+            
+            try:
+                # Create a mock message for fee estimation
+                mock_message = MessageV0.try_compile(
+                    batch_keypair.pubkey(),  # Use batch wallet as fee payer
+                    mock_instructions,
+                    [],
+                    blockhash,
+                )
+                
+                # Create mock transaction for fee estimation
+                mock_transaction = VersionedTransaction(mock_message, [batch_keypair, main_keypair])
+                
+                # Get transaction-specific priority fee
+                priority_fee = get_transaction_compute_unit_price(mock_transaction, "Medium")
+                logger.info(f"Transaction-specific priority fee: {priority_fee} microlamports")
+            except Exception as e:
+                logger.warning(f"Failed to get transaction-specific priority fee: {e}")
+                # Fallback to global priority fee
+                priority_fee = get_optimal_compute_unit_price()
+                logger.info(f"Using fallback priority fee: {priority_fee} microlamports")
+            
+            # Calculate transfer amount, reserving enough for priority fees
+            # Priority fee is in microlamports, convert to lamports and provide safety buffer
+
+            estimated_fee_lamports = int((priority_fee * 200000) / 1e6 )   # Cast to int here
+            
+            transfer_amount = int(0.00099 * 1e9) - estimated_fee_lamports
+            logger.info(f"Using dynamic transfer amount: {transfer_amount} lamports (reserved {priority_fee} for fees)")
+            
+            # Ensure minimum viable transfer amount
+            if transfer_amount < 1000:
+                transfer_amount = 1000  # Ensure at least 1000 lamports (0.000001 SOL)
+                logger.warning(f"Transfer amount too low after fee calculation, using minimum: {transfer_amount} lamports")
             
             # If batch wallet balance appears low, use a smaller transfer amount
             if batch_balance < 0.001:
@@ -1342,27 +1400,33 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 transfer_amount = int(0.000001 * 1e9)  # 0.000001 SOL (1000 lamports)
                 logger.info(f"Using reduced transfer amount due to low balance: {transfer_amount} lamports")
             
+           
+            
+            # Assemble all instructions - now WITH compute budget instructions
+            logger.info("Assembling instructions with compute budget instructions...")
+            
+            # Add compute budget instructions first
+            from solders.compute_budget import set_compute_unit_price, set_compute_unit_limit
+            compute_unit_price_ix = set_compute_unit_price(int(priority_fee))
+            compute_unit_limit_ix = set_compute_unit_limit(200000)
+   
+            
+            instructions = [
+                compute_unit_price_ix,   # Add priority fee instruction
+                compute_unit_limit_ix,
+            ]
+
+            instructions.extend(base_instructions)
             transfer_ix = transfer(
                 TransferParams(
                     from_pubkey=batch_keypair.pubkey(),
                     to_pubkey=main_keypair.pubkey(),
                     lamports=transfer_amount
                 )
-            )
-            
-            # Assemble all instructions - WITHOUT compute budget instructions
-            logger.info("Assembling instructions (without compute budget instructions)...")
-            instructions = [
-                create_wsol_account_instruction,
-                init_wsol_account_instruction,
-            ]
-            
-            if create_token_account_instruction:
-                instructions.append(create_token_account_instruction)
-                
-            instructions.append(swap_instruction)
-            instructions.append(close_wsol_account_instruction)  # Include the close account instruction
+            ) #Mock txn to get priority fees
+           
             instructions.append(transfer_ix)  # Add the transfer as the last instruction
+            
             
             # Get latest blockhash
             blockhash_response = self.client.get_latest_blockhash()
@@ -1592,15 +1656,15 @@ class SolanaVolumeMaker(BaseVolumeMaker):
             
     def _async_batch_buy(self, wallet_index, buy_amount, use_multi_sig):
         """
-        Perform a buy transaction for a single batch wallet asynchronously.
+        Execute a buy operation asynchronously for a batch wallet.
         
         Args:
             wallet_index (int): Index of the batch wallet to use
             buy_amount (float): Amount of SOL to use for buying tokens
-            use_multi_sig (bool): Whether to use multi-signature mode
+            use_multi_sig (bool): Whether to use multi-signature transactions
             
         Returns:
-            dict: Result dictionary with success status and wallet info
+            dict: Result of the operation with status and details
         """
         try:
             if wallet_index >= len(self.batch_wallets):
@@ -1633,6 +1697,23 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                     "amount": buy_amount
                 }
                 
+                # Update priority fee manager based on transaction result
+                from utils.solana_utils import _priority_fee_manager
+                if _priority_fee_manager is not None:
+                    if success:
+                        # Handle successful transaction
+                        logger.info("Notifying priority fee manager of successful transaction")
+                        _priority_fee_manager.handle_transaction_success()
+                    else:
+                        # Handle failed transaction by simulating a network error
+                        logger.warning("Notifying priority fee manager of failed transaction")
+                        error = Exception("transaction failed")
+                        new_fee = _priority_fee_manager.handle_transaction_failure(error)
+                        
+                        # Log the new priority level and fee
+                        new_level = _priority_fee_manager.get_current_priority_level()
+                        logger.info(f"Updated priority level to {new_level} with fee {new_fee}")
+                
                 if success:
                     logger.info(f"Async buy successful for batch wallet {wallet_index}")
                 else:
@@ -1642,6 +1723,15 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 
             except Exception as e:
                 logger.error(f"Error in transaction attempt for wallet {wallet_index}: {e}")
+                
+                # Update priority fee manager on exception
+                from utils.solana_utils import _priority_fee_manager
+                if _priority_fee_manager is not None:
+                    logger.warning("Notifying priority fee manager of transaction error")
+                    new_fee = _priority_fee_manager.handle_transaction_failure(e)
+                    new_level = _priority_fee_manager.get_current_priority_level()
+                    logger.info(f"Updated priority level to {new_level} with fee {new_fee}")
+                
                 return {
                     "wallet_index": wallet_index,
                     "address": batch_wallet['address'],
