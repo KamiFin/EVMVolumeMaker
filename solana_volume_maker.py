@@ -69,6 +69,8 @@ from utils.pool_utils import (
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
 import threading
+# Get the current priority level from the fee manager instead of hardcoding "Medium"
+from utils.solana_utils import _priority_fee_manager
 
 # Configure logging
 logging.basicConfig(
@@ -1372,6 +1374,11 @@ class SolanaVolumeMaker(BaseVolumeMaker):
                 # Create mock transaction for fee estimation
                 mock_transaction = VersionedTransaction(mock_message, [batch_keypair, main_keypair])
                 
+                # Get current priority level from the manager
+                current_priority_level = "Medium"  # Default fallback
+                if _priority_fee_manager is not None:
+                    current_priority_level = _priority_fee_manager.get_current_priority_level()
+                    logger.info(f"Using current priority level from manager: {current_priority_level}")
                 # Get transaction-specific priority fee
                 priority_fee = get_transaction_compute_unit_price(mock_transaction, "Medium")
                 logger.info(f"Transaction-specific priority fee: {priority_fee} microlamports")
